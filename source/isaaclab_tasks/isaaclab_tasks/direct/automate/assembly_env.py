@@ -25,6 +25,7 @@ from . import automate_log_utils as automate_log
 from . import factory_control as fc
 from . import industreal_algo_utils as industreal_algo
 from .assembly_env_cfg import OBS_DIM_CFG, STATE_DIM_CFG, AssemblyEnvCfg
+from .assembly_tasks_cfg import ASSET_DIR
 from .soft_dtw_cuda import SoftDTW
 
 
@@ -36,6 +37,7 @@ class AssemblyEnv(DirectRLEnv):
         cfg.observation_space = sum([OBS_DIM_CFG[obs] for obs in cfg.obs_order])
         cfg.state_space = sum([STATE_DIM_CFG[state] for state in cfg.state_order])
         self.cfg_task = cfg.tasks[cfg.task_name]
+        self._sync_automate_asset_paths()
 
         super().__init__(cfg, render_mode, **kwargs)
 
@@ -69,6 +71,24 @@ class AssemblyEnv(DirectRLEnv):
         # Evaluate
         if self.cfg_task.if_logging_eval:
             self._init_eval_logging()
+
+    def _sync_automate_asset_paths(self):
+        """Keep derived AutoMate asset paths aligned after CLI overrides assembly_id."""
+        assembly_dir = self.cfg_task.assembly_dir
+        expected_assembly_dir = f"{ASSET_DIR}/{self.cfg_task.assembly_id}/"
+        if assembly_dir.startswith(f"{ASSET_DIR}/") and not assembly_dir.rstrip("/").endswith(
+            f"/{self.cfg_task.assembly_id}"
+        ):
+            self.cfg_task.assembly_dir = expected_assembly_dir
+
+        self.cfg_task.fixed_asset.spawn.usd_path = self.cfg_task.assembly_dir + self.cfg_task.fixed_asset_cfg.usd_path
+        self.cfg_task.held_asset.spawn.usd_path = self.cfg_task.assembly_dir + self.cfg_task.held_asset_cfg.usd_path
+
+        disassembly_path_json = self.cfg_task.disassembly_path_json
+        if disassembly_path_json.startswith(f"{ASSET_DIR}/") and os.path.basename(disassembly_path_json) == (
+            "disassemble_traj.json"
+        ):
+            self.cfg_task.disassembly_path_json = self.cfg_task.assembly_dir + "disassemble_traj.json"
 
     def _init_eval_logging(self):
         self.held_asset_pose_log = torch.empty(
@@ -195,13 +215,15 @@ class AssemblyEnv(DirectRLEnv):
     def _load_assembly_info(self):
         """Load grasp pose and disassembly distance for plugs in each environment."""
 
-        retrieve_file_path(self.cfg_task.plug_grasp_json, download_dir="./")
-        with open(os.path.basename(self.cfg_task.plug_grasp_json)) as f:
+        download_dir = os.path.join(self.cfg.log_dir, "assets") if self.cfg.log_dir else "./"
+
+        plug_grasp_path = retrieve_file_path(self.cfg_task.plug_grasp_json, download_dir=download_dir)
+        with open(plug_grasp_path) as f:
             plug_grasp_dict = json.load(f)
         plug_grasps = [plug_grasp_dict[f"asset_{self.cfg_task.assembly_id}"] for i in range(self.num_envs)]
 
-        retrieve_file_path(self.cfg_task.disassembly_dist_json, download_dir="./")
-        with open(os.path.basename(self.cfg_task.disassembly_dist_json)) as f:
+        disassembly_dist_path = retrieve_file_path(self.cfg_task.disassembly_dist_json, download_dir=download_dir)
+        with open(disassembly_dist_path) as f:
             disassembly_dist_dict = json.load(f)
         disassembly_dists = [disassembly_dist_dict[f"asset_{self.cfg_task.assembly_id}"] for i in range(self.num_envs)]
 
@@ -223,8 +245,9 @@ class AssemblyEnv(DirectRLEnv):
     def _load_disassembly_data(self):
         """Load pre-collected disassembly trajectories (end-effector position only)."""
 
-        retrieve_file_path(self.cfg_task.disassembly_path_json, download_dir="./")
-        with open(os.path.basename(self.cfg_task.disassembly_path_json)) as f:
+        download_dir = os.path.join(self.cfg.log_dir, "assets") if self.cfg.log_dir else "./"
+        disassembly_path = retrieve_file_path(self.cfg_task.disassembly_path_json, download_dir=download_dir)
+        with open(disassembly_path) as f:
             disassembly_traj = json.load(f)
 
         eef_pos_traj = []
