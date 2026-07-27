@@ -64,6 +64,14 @@ _build
 # Teleop Recorded Dataset
 /datasets/
 
+# AutoMate generated and downloaded assets
+/AutoMate/
+/*_disassemble_traj.json
+/plug_grasps.json
+/disassembly_dist.json
+/plug.obj
+/socket.obj
+
 # Tests
 tests/
 
