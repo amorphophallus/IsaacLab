@@ -16,6 +16,7 @@ import isaacsim.core.utils.torch as torch_utils
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.envs import DirectRLEnv
+from isaaclab.sensors import Camera
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, retrieve_file_path
 from isaaclab.utils.math import axis_angle_from_quat
@@ -36,6 +37,8 @@ class AssemblyEnv(DirectRLEnv):
         # Update number of obs/states
         cfg.observation_space = sum([OBS_DIM_CFG[obs] for obs in cfg.obs_order])
         cfg.state_space = sum([STATE_DIM_CFG[state] for state in cfg.state_order])
+        if cfg.camera.enabled:
+            self._configure_camera_mode(cfg)
         self.cfg_task = cfg.tasks[cfg.task_name]
         self._sync_automate_asset_paths()
 
@@ -71,6 +74,24 @@ class AssemblyEnv(DirectRLEnv):
         # Evaluate
         if self.cfg_task.if_logging_eval:
             self._init_eval_logging()
+
+    @staticmethod
+    def _configure_camera_mode(cfg: AssemblyEnvCfg):
+        """Apply simulation settings required by the two standard RTX cameras."""
+        if cfg.scene.num_envs != 1:
+            raise ValueError(
+                "AutoMate camera output supports exactly one environment; "
+                f"received cfg.scene.num_envs={cfg.scene.num_envs}."
+            )
+        if cfg.camera.gpu_collision_stack_size <= 0:
+            raise ValueError("cfg.camera.gpu_collision_stack_size must be positive.")
+
+        cfg.sim.render_interval = cfg.decimation
+        cfg.num_rerenders_on_reset = max(cfg.num_rerenders_on_reset, 3)
+        # The default AutoMate stack plus two RTX cameras exceeds an 8 GB GPU.
+        cfg.sim.physx.gpu_collision_stack_size = min(
+            cfg.sim.physx.gpu_collision_stack_size, cfg.camera.gpu_collision_stack_size
+        )
 
     def _sync_automate_asset_paths(self):
         """Keep derived AutoMate asset paths aligned after CLI overrides assembly_id."""
@@ -289,6 +310,12 @@ class AssemblyEnv(DirectRLEnv):
         self.scene.articulations["fixed_asset"] = self._fixed_asset
         self.scene.rigid_objects["held_asset"] = self._held_asset
 
+        if self.cfg.camera.enabled:
+            self._wrist_camera = Camera(self.cfg.camera.wrist)
+            self._front_camera = Camera(self.cfg.camera.front)
+            self.scene.sensors["wrist_camera"] = self._wrist_camera
+            self.scene.sensors["front_camera"] = self._front_camera
+
         # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
@@ -405,6 +432,41 @@ class AssemblyEnv(DirectRLEnv):
         state_tensors = torch.cat(state_tensors, dim=-1)
 
         return {"policy": obs_tensors, "critic": state_tensors}
+
+    def get_camera_observations(self, env_idx: int = 0) -> dict[str, np.ndarray]:
+        """Return FurnitureBench-style RGB-D observations without changing RL observations.
+
+        The key mapping is ``image1=wrist`` and ``image2=front``. Call this method after
+        :meth:`reset` or :meth:`step` so the returned frames reflect the latest render.
+        """
+        if not self.cfg.camera.enabled:
+            raise RuntimeError("Camera output is disabled. Set cfg.camera.enabled=True before creating the environment.")
+        if not isinstance(env_idx, int):
+            raise TypeError(f"env_idx must be an int, received {type(env_idx).__name__}.")
+        if env_idx < 0 or env_idx >= self.num_envs:
+            raise IndexError(f"env_idx={env_idx} is outside the valid range [0, {self.num_envs}).")
+
+        wrist_output = self._wrist_camera.data.output
+        front_output = self._front_camera.data.output
+
+        return {
+            "color_image1": wrist_output["rgb"][env_idx].detach().cpu().numpy().copy(),
+            "color_image2": front_output["rgb"][env_idx].detach().cpu().numpy().copy(),
+            "depth_image1": (
+                wrist_output["distance_to_image_plane"][env_idx, ..., 0]
+                .detach()
+                .cpu()
+                .numpy()
+                .astype(np.float32, copy=True)
+            ),
+            "depth_image2": (
+                front_output["distance_to_image_plane"][env_idx, ..., 0]
+                .detach()
+                .cpu()
+                .numpy()
+                .astype(np.float32, copy=True)
+            ),
+        }
 
     def _reset_buffers(self, env_ids):
         """Reset buffers."""

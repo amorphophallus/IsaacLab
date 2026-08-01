@@ -8,6 +8,7 @@ from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.sensors import CameraCfg
 from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
 from isaaclab.utils import configclass
@@ -68,6 +69,62 @@ class CtrlCfg:
 
 
 @configclass
+class AssemblyCameraCfg:
+    """Optional RGB-D cameras aligned with robust-rearrangement's custom setup."""
+
+    enabled: bool = False
+    gpu_collision_stack_size: int = 2**27
+
+    wrist: CameraCfg = CameraCfg(
+        prim_path="/World/envs/env_0/Robot/panda_hand/wrist_camera",
+        update_period=0.0,
+        height=480,
+        width=640,
+        data_types=["rgb", "distance_to_image_plane"],
+        depth_clipping_behavior="zero",
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=1.839464721675,
+            horizontal_aperture=1.92,
+            vertical_aperture=1.44,
+            clipping_range=(1.0e-5, 1.0e5),
+            f_stop=0.0,
+            focus_distance=0.0,
+        ),
+        offset=CameraCfg.OffsetCfg(
+            pos=(-0.05, 0.0, 0.04),
+            rot=(-0.12278780396897282, -0.6963642403200189, 0.696364240320019, 0.1227878039689728),
+            convention="opengl",
+        ),
+    )
+
+    front: CameraCfg = CameraCfg(
+        prim_path="/World/envs/env_0/front_camera",
+        update_period=0.0,
+        height=480,
+        width=640,
+        data_types=["rgb", "distance_to_image_plane"],
+        depth_clipping_behavior="zero",
+        spawn=sim_utils.PinholeCameraCfg(
+            # RR renders at 1280x720 with a 69.4-degree horizontal FOV, then
+            # center-crops to 4:3. This is the equivalent focal length at 640x480.
+            focal_length=1.848554759492,
+            horizontal_aperture=1.92,
+            vertical_aperture=1.44,
+            clipping_range=(0.1, 1.0e5),
+            f_stop=200.0,
+            focus_distance=0.6,
+        ),
+        offset=CameraCfg.OffsetCfg(
+            # RR main-sim camera (position [0.90, 0.0, 0.65], target [-1.0, 0.0, 0.30])
+            # expressed relative to its robot base at [-0.30, 0.0, 0.415].
+            pos=(1.2, 0.0, 0.235),
+            rot=(0.5434064844747748, 0.4524482209388897, 0.45244822093888976, 0.5434064844747747),
+            convention="opengl",
+        ),
+    )
+
+
+@configclass
 class AssemblyEnvCfg(DirectRLEnvCfg):
     decimation = 8
     action_space = 6
@@ -100,6 +157,7 @@ class AssemblyEnvCfg(DirectRLEnvCfg):
     tasks: dict = {"insertion": Insertion()}
     obs_rand: ObsRandCfg = ObsRandCfg()
     ctrl: CtrlCfg = CtrlCfg()
+    camera: AssemblyCameraCfg = AssemblyCameraCfg()
 
     # episode_length_s = 10.0  # Probably need to override.
     episode_length_s = 5.0
