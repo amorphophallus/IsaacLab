@@ -20,6 +20,8 @@ from .schema import (
     OPTIONAL_OBSERVATION_FIELDS,
     ROBOT_STATE_KEYS,
     ROBOT_STATE_SHAPES,
+    STORED_IMAGE_HEIGHT,
+    STORED_IMAGE_WIDTH,
     TRAJECTORY_KEYS,
     Trajectory,
 )
@@ -149,27 +151,27 @@ def _validate_observation(observation: Any, index: int) -> None:
     _require_array(
         observation["color_image1"],
         path=f"{path}.color_image1",
-        shape=(480, 640, 3),
+        shape=(STORED_IMAGE_HEIGHT, STORED_IMAGE_WIDTH, 3),
         dtype=np.dtype(np.uint8),
         finite=False,
     )
     _require_array(
         observation["color_image2"],
         path=f"{path}.color_image2",
-        shape=(480, 640, 3),
+        shape=(STORED_IMAGE_HEIGHT, STORED_IMAGE_WIDTH, 3),
         dtype=np.dtype(np.uint8),
         finite=False,
     )
     _require_array(
         observation["depth_image1"],
         path=f"{path}.depth_image1",
-        shape=(480, 640),
+        shape=(STORED_IMAGE_HEIGHT, STORED_IMAGE_WIDTH),
         dtype=np.dtype(np.float32),
     )
     _require_array(
         observation["depth_image2"],
         path=f"{path}.depth_image2",
-        shape=(480, 640),
+        shape=(STORED_IMAGE_HEIGHT, STORED_IMAGE_WIDTH),
         dtype=np.dtype(np.float32),
     )
     parts = _require_array(

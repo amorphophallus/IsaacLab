@@ -12,7 +12,14 @@ from typing import Any
 import numpy as np
 import torch
 
-from .schema import CameraInfo, Observation, RobotState, observation_placeholders
+from .schema import (
+    STORED_IMAGE_HEIGHT,
+    STORED_IMAGE_WIDTH,
+    CameraInfo,
+    Observation,
+    RobotState,
+    observation_placeholders,
+)
 from .transforms import pose_world_to_base, rr_camera_to_base_matrix, twist_world_to_base, wxyz_to_xyzw
 
 
@@ -113,11 +120,15 @@ class StateAdapter:
             camera_data.quat_w_world[env_idx],
         )
         base_to_camera = torch.linalg.inv(camera_to_base)
-        height, width = camera_data.image_shape
+        source_height, source_width = camera_data.image_shape
+        crop_top, crop_left = self._center_crop_offsets(source_height, source_width, "front camera")
+        intrinsics = camera_data.intrinsic_matrices[env_idx].detach().clone()
+        intrinsics[0, 2] -= crop_left
+        intrinsics[1, 2] -= crop_top
         return {
             "front_camera": {
-                "image_size": np.array([width, height], dtype=np.int32),
-                "intrinsics": _float32_numpy(camera_data.intrinsic_matrices[env_idx]),
+                "image_size": np.array([STORED_IMAGE_WIDTH, STORED_IMAGE_HEIGHT], dtype=np.int32),
+                "intrinsics": _float32_numpy(intrinsics),
                 "camera_to_sim_local": _float32_numpy(camera_to_base),
                 "sim_local_to_camera": _float32_numpy(base_to_camera),
             }
@@ -159,6 +170,7 @@ class StateAdapter:
             raise ValueError(f"{name} must have shape (H, W, 3/4), received {image.shape}.")
         if image.shape[-1] == 4:
             image = image[..., :3]
+        image = StateAdapter._center_crop(image, name)
         return np.ascontiguousarray(image, dtype=np.uint8)
 
     @staticmethod
@@ -167,4 +179,23 @@ class StateAdapter:
         if image.ndim != 2:
             raise ValueError(f"{name} must have shape (H, W), received {image.shape}.")
         image = np.nan_to_num(image, copy=True, nan=0.0, posinf=0.0, neginf=0.0)
+        image = StateAdapter._center_crop(image, name)
         return np.ascontiguousarray(image, dtype=np.float32)
+
+    @staticmethod
+    def _center_crop(image: np.ndarray, name: str) -> np.ndarray:
+        crop_top, crop_left = StateAdapter._center_crop_offsets(image.shape[0], image.shape[1], name)
+        return image[
+            crop_top : crop_top + STORED_IMAGE_HEIGHT,
+            crop_left : crop_left + STORED_IMAGE_WIDTH,
+            ...,
+        ]
+
+    @staticmethod
+    def _center_crop_offsets(height: int, width: int, name: str) -> tuple[int, int]:
+        if height < STORED_IMAGE_HEIGHT or width < STORED_IMAGE_WIDTH:
+            raise ValueError(
+                f"{name} is too small for a {STORED_IMAGE_WIDTH}x{STORED_IMAGE_HEIGHT} center crop: "
+                f"received width={width}, height={height}."
+            )
+        return (height - STORED_IMAGE_HEIGHT) // 2, (width - STORED_IMAGE_WIDTH) // 2

@@ -31,7 +31,12 @@ from data_collection import (  # noqa: E402
     validate_trajectory,
     write_trajectory,
 )
-from data_collection.schema import ROBOT_STATE_KEYS, ROBOT_STATE_SHAPES  # noqa: E402
+from data_collection.schema import (  # noqa: E402
+    ROBOT_STATE_KEYS,
+    ROBOT_STATE_SHAPES,
+    STORED_IMAGE_HEIGHT,
+    STORED_IMAGE_WIDTH,
+)
 from data_collection.transforms import (  # noqa: E402
     canonicalize_quat_wxyz,
     pose_world_to_base,
@@ -79,10 +84,16 @@ def _fake_env() -> SimpleNamespace:
         intrinsic_matrices=torch.tensor([[[600.0, 0.0, 320.0], [0.0, 600.0, 240.0], [0.0, 0.0, 1.0]]]),
         image_shape=(480, 640),
     )
+    color_image1 = np.zeros((480, 640, 4), dtype=np.uint8)
+    color_image1[..., 0] = np.arange(640, dtype=np.uint16) % 256
+    color_image1[..., 1] = (np.arange(480, dtype=np.uint16) % 256)[:, None]
+    depth_image1 = (
+        np.arange(480, dtype=np.float32)[:, None] * 1000.0 + np.arange(640, dtype=np.float32)[None, :]
+    )
     camera_observation = {
-        "color_image1": np.zeros((480, 640, 4), dtype=np.uint8),
+        "color_image1": color_image1,
         "color_image2": np.ones((480, 640, 3), dtype=np.uint8),
-        "depth_image1": np.full((480, 640), 0.5, dtype=np.float32),
+        "depth_image1": depth_image1,
         "depth_image2": np.full((480, 640), 0.75, dtype=np.float32),
     }
     env = SimpleNamespace(
@@ -183,14 +194,25 @@ def test_state_adapter_strict_rr_schema_and_parts_order():
     for name, shape in ROBOT_STATE_SHAPES.items():
         assert observation["robot_state"][name].shape == shape
         assert observation["robot_state"][name].dtype == np.float32
-    assert observation["color_image1"].shape == (480, 640, 3)
+    assert observation["color_image1"].shape == (STORED_IMAGE_HEIGHT, STORED_IMAGE_WIDTH, 3)
     assert observation["color_image1"].dtype == np.uint8
+    assert observation["color_image1"][0, 0, :2].tolist() == [208, 128]
+    assert observation["color_image1"][-1, -1, :2].tolist() == [175, 95]
+    assert observation["depth_image1"].shape == (STORED_IMAGE_HEIGHT, STORED_IMAGE_WIDTH)
     assert observation["depth_image1"].dtype == np.float32
+    assert observation["depth_image1"][0, 0] == pytest.approx(128208.0)
+    assert observation["depth_image1"][-1, -1] == pytest.approx(351431.0)
     assert np.allclose(observation["parts_poses"][:3], [0.1, 0.0, 0.0])
     assert np.allclose(observation["parts_poses"][7:10], [0.2, 0.0, 0.0])
     assert np.allclose(observation["robot_state"]["gripper_width"], [0.03])
     required_fields = {"robot_state", "color_image1", "color_image2", "depth_image1", "depth_image2", "parts_poses"}
     assert all(observation[key] is None for key in observation if key not in required_fields)
+
+    front_camera = StateAdapter().camera_info(_fake_env())["front_camera"]
+    assert front_camera["image_size"].tolist() == [STORED_IMAGE_WIDTH, STORED_IMAGE_HEIGHT]
+    assert front_camera["intrinsics"] == pytest.approx(
+        np.array([[600.0, 0.0, 112.0], [0.0, 600.0, 112.0], [0.0, 0.0, 1.0]], dtype=np.float32)
+    )
 
 
 def test_action_adapter_applies_ema_workspace_limit_and_rr_quaternion():

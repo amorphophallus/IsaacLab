@@ -80,6 +80,9 @@ ROBOT_STATE_KEYS = frozenset(RobotState.__required_keys__)
 CAMERA_INFO_KEYS = frozenset(CameraInfo.__required_keys__)
 CAMERA_CALIBRATION_KEYS = frozenset(CameraCalibration.__required_keys__)
 
+STORED_IMAGE_HEIGHT = 224
+STORED_IMAGE_WIDTH = 224
+
 ROBOT_STATE_SHAPES: dict[str, tuple[int, ...]] = {
     "ee_pos": (3,),
     "ee_quat": (4,),
