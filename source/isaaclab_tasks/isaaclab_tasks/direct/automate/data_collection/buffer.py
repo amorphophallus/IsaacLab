@@ -11,7 +11,7 @@ from copy import deepcopy
 
 import numpy as np
 
-from .schema import CameraInfo, Observation, Trajectory
+from .schema import ENV_NAME, CameraInfo, Observation, Trajectory
 
 
 class EpisodeBuffer:
@@ -66,6 +66,7 @@ class EpisodeBuffer:
             "success": bool(success),
             "task": str(task),
             "action_type": "delta",
+            "env": ENV_NAME,
         }
 
     def _assert_lengths(self) -> None:

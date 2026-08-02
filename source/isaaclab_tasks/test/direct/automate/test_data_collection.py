@@ -32,6 +32,7 @@ from data_collection import (  # noqa: E402
     write_trajectory,
 )
 from data_collection.schema import (  # noqa: E402
+    ENV_NAME,
     ROBOT_STATE_KEYS,
     ROBOT_STATE_SHAPES,
     STORED_IMAGE_HEIGHT,
@@ -270,6 +271,7 @@ def test_episode_buffer_enforces_t_plus_one_observations():
     )
     assert len(trajectory["observations"]) == 2
     assert len(trajectory["actions"]) == len(trajectory["rewards"]) == 1
+    assert trajectory["env"] == ENV_NAME == "AutoMate"
     validate_trajectory(trajectory)
 
 
@@ -284,6 +286,13 @@ def test_validator_rejects_non_automate_task_name():
     trajectory = _valid_trajectory()
     trajectory["task"] = "assembly_00110"
     with pytest.raises(TrajectoryValidationError, match="automate_insertion"):
+        validate_trajectory(trajectory)
+
+
+def test_validator_rejects_wrong_environment_name():
+    trajectory = _valid_trajectory()
+    trajectory["env"] = "automate"
+    with pytest.raises(TrajectoryValidationError, match="env must be 'AutoMate'"):
         validate_trajectory(trajectory)
 
 

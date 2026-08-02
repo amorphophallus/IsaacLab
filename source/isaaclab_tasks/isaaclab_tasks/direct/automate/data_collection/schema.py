@@ -72,6 +72,7 @@ class Trajectory(TypedDict):
     success: bool
     task: str
     action_type: str
+    env: str
 
 
 TRAJECTORY_KEYS = frozenset(Trajectory.__required_keys__)
@@ -80,6 +81,7 @@ ROBOT_STATE_KEYS = frozenset(RobotState.__required_keys__)
 CAMERA_INFO_KEYS = frozenset(CameraInfo.__required_keys__)
 CAMERA_CALIBRATION_KEYS = frozenset(CameraCalibration.__required_keys__)
 
+ENV_NAME = "AutoMate"
 STORED_IMAGE_HEIGHT = 224
 STORED_IMAGE_WIDTH = 224
 

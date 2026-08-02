@@ -16,6 +16,7 @@ import numpy as np
 from .schema import (
     CAMERA_CALIBRATION_KEYS,
     CAMERA_INFO_KEYS,
+    ENV_NAME,
     OBSERVATION_KEYS,
     OPTIONAL_OBSERVATION_FIELDS,
     ROBOT_STATE_KEYS,
@@ -89,6 +90,8 @@ def validate_trajectory(trajectory: Trajectory) -> None:
 
     if type(trajectory["success"]) is not bool:
         raise TrajectoryValidationError("success must be a Python bool.")
+    if trajectory["env"] != ENV_NAME:
+        raise TrajectoryValidationError(f"env must be {ENV_NAME!r}, received {trajectory['env']!r}.")
     if not isinstance(trajectory["task"], str) or _TASK_PATTERN.fullmatch(trajectory["task"]) is None:
         raise TrajectoryValidationError("task must match 'automate_insertion_<assembly_id>'.")
     if trajectory["action_type"] != "delta":
