@@ -61,6 +61,14 @@ _build
 # Pre-Trained Checkpoints
 /.pretrained_checkpoints/
 
+# Local model and checkpoint artifacts
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.jit
+*.hdf5
+
 # Teleop Recorded Dataset
 /datasets/
 
