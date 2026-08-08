@@ -3,20 +3,12 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-# Nightly auto-compile: rolls accumulated fragments under
+# Manual changelog compilation: rolls accumulated fragments under
 # ``source/<pkg>/changelog.d/`` into per-package ``CHANGELOG.rst`` entries,
 # bumps each package's version metadata, deletes consumed fragments, and
-# pushes the result back to each branch in the configured list. Keeps every
-# tracked branch's changelog current without requiring a maintainer to run
-# ``compile`` by hand.
-#
-# Scheduled workflow — must live on the default branch (``main``) for the
-# cron to register. See ``.github/workflows/README.md``.
-#
-# Adding a branch to the nightly set is a one-line edit to ``env.CRON_BRANCHES``
-# below. Each target branch uses its own ``tools/changelog/cli.py`` (the
-# same copy the PR gate already runs), so the nightly compile honours the
-# same rules that validated the fragments.
+# pushes the result back to the branch selected through workflow_dispatch.
+# Each target branch uses its own ``tools/changelog/cli.py`` (the same copy
+# the PR gate already runs), so compilation honours the same validation rules.
 #
 # The push uses a short-lived GitHub App installation token minted from
 # ``CHANGELOG_APP_ID`` + ``CHANGELOG_APP_PRIVATE_KEY`` (repo secrets). The
@@ -30,19 +22,7 @@
 
 name: Nightly Changelog Compilation
 
-# Branches the nightly cron compiles. Single source of truth — append a
-# ref here to extend the nightly set (the active release branch belongs
-# here). Each branch must carry ``tools/changelog/cli.py`` and the
-# isaaclab-bot App must be in its branch-ruleset bypass list.
-# Surrounding whitespace per entry is stripped by the resolver below.
-env:
-  CRON_BRANCHES: develop,release/3.0.0-beta2
-
 on:
-  schedule:
-    # Run nightly at 5 AM UTC (one hour after daily-compatibility, so we
-    # don't compete for runner capacity).
-    - cron: '0 5 * * *'
   workflow_dispatch:
     inputs:
       branch:
@@ -67,9 +47,8 @@ permissions:
 
 jobs:
   resolve-branches:
-    # CSV → JSON array bridge. ``workflow_dispatch`` inputs can only be
-    # string / bool / choice, so the branch list arrives as a comma-
-    # separated string; the matrix below needs a JSON list to fan out.
+    # Convert the required workflow_dispatch branch input into the JSON array
+    # expected by the matrix below.
     # Mirrors the ``setup-versions`` job in ``daily-compatibility.yml``.
     name: Resolve branch list
     runs-on: ubuntu-latest
@@ -79,22 +58,12 @@ jobs:
     steps:
       - id: b
         env:
-          # Schedule → the CRON_BRANCHES list. Manual → the single branch
-          # the maintainer entered. The two paths are intentionally
-          # asymmetric: cron is the configured set, manual is exactly one
-          # branch (required input).
-          BRANCHES: ${{ github.event_name == 'schedule' && env.CRON_BRANCHES || inputs.branch }}
-          # ``EVENT_NAME`` mirrors ``github.event_name`` so the guard below
-          # branches on it without re-interpolating into the shell.
-          EVENT_NAME: ${{ github.event_name }}
+          BRANCHES: ${{ inputs.branch }}
         run: |
-          # CSV → JSON array, trimming surrounding whitespace per entry.
-          # Manual produces a 1-element array; cron produces N elements.
+          # Convert the branch to a one-element JSON array.
           arr=$(echo "$BRANCHES" | tr ',' '\n' | xargs -n1 | jq -R . | jq -s -c .)
-          # Manual trigger contract: exactly one branch. A maintainer who
-          # pastes a comma-separated list into the dispatch form should
-          # see a clear error, not a silent multi-branch fan-out.
-          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$(echo "$arr" | jq 'length')" -ne 1 ]; then
+          # Manual trigger contract: exactly one branch.
+          if [ "$(echo "$arr" | jq 'length')" -ne 1 ]; then
             echo "::error::Manual trigger accepts exactly one branch; got $arr. Fire the workflow separately per branch."
             exit 1
           fi
@@ -141,10 +110,8 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
         with:
           # Operate on the target branch, not the repo's default branch.
-          # Scheduled workflows fire from the default branch's workflow
-          # file, but the *checkout* is the branch we're compiling so the
-          # compile sees that branch's accumulated fragments and the push
-          # writes back to it.
+          # The checkout is the branch we're compiling so the compile sees
+          # that branch's accumulated fragments and writes back to it.
           ref: ${{ matrix.branch }}
           # App token (vs. GITHUB_TOKEN) means the push is signed by
           # ``isaaclab-bot`` — the bypass identity — and downstream CI
@@ -161,10 +128,10 @@ jobs:
           # Loud-fail this matrix entry (not the whole run — ``fail-fast:
           # false`` keeps siblings going) when the target branch lacks
           # ``tools/changelog/cli.py``. A red tile is the desired signal:
-          # a branch in the nightly set without the compile tooling is a
-          # configuration error, not a "no-op" condition.
+          # a selected branch without the compile tooling is a configuration
+          # error, not a "no-op" condition.
           if [ ! -f tools/changelog/cli.py ]; then
-            echo "::error::Branch '$TARGET_BRANCH' is missing tools/changelog/cli.py — drop it from env.CRON_BRANCHES (or the dispatch input) or restore the tooling on that branch."
+            echo "::error::Branch '$TARGET_BRANCH' is missing tools/changelog/cli.py — choose another branch or restore the tooling on that branch."
             exit 1
           fi
 
@@ -223,9 +190,8 @@ jobs:
             # The leading ``[CI]`` tag groups every machine-driven commit
             # (so future automations — auto image rebuilds, auto publish,
             # etc. — all share the prefix and are easy to find/filter in
-            # ``git log --grep``). The second tag names the specific
-            # action. The trigger event suffix (``schedule`` vs
-            # ``workflow_dispatch``) is preserved for traceability.
+            # ``git log --grep``). The second tag names the specific action,
+            # and the trigger event is preserved for traceability.
             #
             # The body lists every package that bumped, derived from whichever
             # supported version metadata file changed on the target branch.

@@ -1,7 +1,6 @@
 # CI Workflows
 
-`schedule:` and `workflow_dispatch:` triggers fire **only from the default
-branch (`main`)**. A workflow YAML must live on `main` for its cron to
-register — the same file on other branches has no effect. `pull_request:`
-and `push:` triggers fire from the event branch's file and work normally
-on `develop`.
+Periodic `schedule:` triggers are disabled in this repository.
+`workflow_dispatch:` workflows remain available for manual runs from the
+default branch (`main`). `pull_request:` and `push:` triggers fire from the
+event branch's workflow file and continue to work normally.
