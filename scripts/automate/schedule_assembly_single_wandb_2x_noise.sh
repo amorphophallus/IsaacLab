@@ -14,12 +14,17 @@ Options:
 Environment:
   GPU_IDS             Comma/space separated GPU list. Default: ${GPU_ID:-6}
   TASK_IDS            Optional comma/space separated assembly IDs. Default: all supported IDs.
-  LOG_DIR             Log directory. Default: logs/automate_assembly_2x_noise_scheduler/<timestamp>
+  OUTPUT_ROOT         Root for checkpoints, W&B data, temp files, and scheduler logs.
+                      Default: /mnt/nas/share2/home/lq
+  LOG_DIR             Scheduler log directory. Default:
+                      OUTPUT_ROOT/logs/automate_assembly_2x_noise_scheduler/<timestamp>
   POLL_SECONDS        Heartbeat interval while waiting for running jobs. Default: 30
   DRY_RUN             If true, print the schedule without launching training.
-  RUN_NAME_PREFIX     Prefix for RUN_NAME. Default: automate_assembly
+  SKIP_COMPLETED      If true, omit tasks with an ep_<MAX_ITERATIONS> checkpoint.
+  RUN_NAME_PREFIX     Prefix for RUN_NAME. Default:
+                      OUTPUT_ROOT/logs/rl_games/Assembly/automate_assembly
   WANDB_RUN_NAME_PREFIX
-                      Prefix for WANDB_RUN_NAME. Default: RUN_NAME_PREFIX
+                      Prefix for WANDB_RUN_NAME. Default: automate_assembly
   TRAIN_SCRIPT        Single-task training script to launch.
 
 Per task, this scheduler sets:
@@ -147,6 +152,7 @@ launch_task() {
 
   echo "[Scheduler] Launch assembly_id=${assembly_id} on GPU=${gpu_id}; log=${log_path}"
   (
+    export OUTPUT_ROOT="${OUTPUT_ROOT}"
     export GPU_ID="${gpu_id}"
     export ASSEMBLY_ID="${assembly_id}"
     export DISASSEMBLY_TRAJ="AutoMate/${assembly_id}/disassemble_traj.json"
@@ -233,7 +239,7 @@ wait_for_activity() {
 
   CURRENT_TIMER_PID=""
 
-  if [[ "${FINISHED_PID}" == "${timer_pid}" ]]; then
+  if [[ "${FINISHED_PID:-}" == "${timer_pid}" ]]; then
     FINISHED_PID=""
     FINISHED_STATUS=0
     return 1
@@ -245,7 +251,7 @@ wait_for_activity() {
   wait "${timer_pid}" 2>/dev/null || true
 
   FINISHED_STATUS="${wait_status}"
-  if [[ -z "${FINISHED_PID}" ]]; then
+  if [[ -z "${FINISHED_PID:-}" ]]; then
     return 2
   fi
   return 0
@@ -287,8 +293,13 @@ if [[ ! "${POLL_SECONDS}" =~ ^[0-9]+$ ]] || ((POLL_SECONDS < 1)); then
   die "POLL_SECONDS must be a positive integer: ${POLL_SECONDS}"
 fi
 
-RUN_NAME_PREFIX="${RUN_NAME_PREFIX:-automate_assembly}"
-WANDB_RUN_NAME_PREFIX="${WANDB_RUN_NAME_PREFIX:-${RUN_NAME_PREFIX}}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/mnt/nas/share2/home/lq}"
+if [[ "${OUTPUT_ROOT}" != /* ]]; then
+  OUTPUT_ROOT="${REPO_ROOT}/${OUTPUT_ROOT}"
+fi
+
+RUN_NAME_PREFIX="${RUN_NAME_PREFIX:-${OUTPUT_ROOT}/logs/rl_games/Assembly/automate_assembly}"
+WANDB_RUN_NAME_PREFIX="${WANDB_RUN_NAME_PREFIX:-automate_assembly}"
 
 GPU_IDS_RAW="${GPU_IDS:-${GPU_ID:-6}}"
 declare -a GPU_IDS_ARRAY=()
@@ -347,20 +358,41 @@ for task_id in "${TASK_IDS_ARRAY[@]}"; do
   [[ -f "${traj_path}" ]] || die "Missing disassembly trajectory: ${traj_path}"
 done
 
+declare -a SKIPPED_IDS=()
+if is_truthy "${SKIP_COMPLETED:-0}"; then
+  declare -a PENDING_TASK_IDS=()
+  completion_epoch="${MAX_ITERATIONS:-100}"
+
+  for task_id in "${TASK_IDS_ARRAY[@]}"; do
+    run_dir="$(make_run_name "${RUN_NAME_PREFIX}" "${task_id}")"
+    if compgen -G "${run_dir}/nn/last_Assembly_ep_${completion_epoch}_*.pth" >/dev/null; then
+      SKIPPED_IDS+=("${task_id}")
+    else
+      PENDING_TASK_IDS+=("${task_id}")
+    fi
+  done
+
+  TASK_IDS_ARRAY=("${PENDING_TASK_IDS[@]}")
+fi
+
 if ((LIST_ONLY)); then
   printf "%s\n" "${TASK_IDS_ARRAY[@]}"
   exit 0
 fi
 
-LOG_DIR="${LOG_DIR:-logs/automate_assembly_2x_noise_scheduler/$(date +%Y%m%d_%H%M%S)}"
+LOG_DIR="${LOG_DIR:-${OUTPUT_ROOT}/logs/automate_assembly_2x_noise_scheduler/$(date +%Y%m%d_%H%M%S)}"
 if [[ "${LOG_DIR}" != /* ]]; then
   LOG_DIR="${REPO_ROOT}/${LOG_DIR}"
 fi
 
 echo "[Scheduler] Repository: ${REPO_ROOT}"
 echo "[Scheduler] Training script: ${TRAIN_SCRIPT_PATH}"
+echo "[Scheduler] Output root: ${OUTPUT_ROOT}"
 echo "[Scheduler] GPUs: $(join_by ', ' "${GPU_IDS_ARRAY[@]}")"
 echo "[Scheduler] Tasks: ${#TASK_IDS_ARRAY[@]}"
+if ((${#SKIPPED_IDS[@]} > 0)); then
+  echo "[Scheduler] Skipped completed tasks: ${#SKIPPED_IDS[@]}"
+fi
 echo "[Scheduler] Log directory: ${LOG_DIR}"
 echo "[Scheduler] Poll seconds: ${POLL_SECONDS}"
 

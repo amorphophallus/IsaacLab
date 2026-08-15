@@ -32,6 +32,8 @@ Options:
 
 Environment overrides:
   CONDA_ROOT, CONDA_ENV, GPU_ID, NUM_ENVS, SEED, MAX_ITERATIONS
+  OUTPUT_ROOT         Root for checkpoints, W&B data, caches, and temp files.
+                      Default: /mnt/nas/share2/home/lq
   DISASSEMBLY_TRAJ
   RUN_NAME, WANDB_ENTITY, WANDB_PROJECT_NAME, WANDB_RUN_NAME, WANDB_MODE
 EOF
@@ -123,11 +125,23 @@ NUM_ENVS="${NUM_ENVS:-2048}"
 SEED="${SEED:-0}"
 MAX_ITERATIONS="${MAX_ITERATIONS:-100}"
 DISASSEMBLY_TRAJ="${DISASSEMBLY_TRAJ:-AutoMate/${ASSEMBLY_ID}/disassemble_traj.json}"
-RUN_NAME="${RUN_NAME:-automate_assembly_${ASSEMBLY_ID}_2x_noise}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/mnt/nas/share2/home/lq}"
+if [[ "${OUTPUT_ROOT}" != /* ]]; then
+  OUTPUT_ROOT="${REPO_ROOT}/${OUTPUT_ROOT}"
+fi
+RUN_BASENAME="automate_assembly_${ASSEMBLY_ID}_2x_noise"
+RUN_NAME="${RUN_NAME:-${OUTPUT_ROOT}/logs/rl_games/Assembly/${RUN_BASENAME}}"
 WANDB_ENTITY="${WANDB_ENTITY:-qili0502-zhejiang-university}"
 WANDB_PROJECT_NAME="${WANDB_PROJECT_NAME:-automate}"
-WANDB_RUN_NAME="${WANDB_RUN_NAME:-${RUN_NAME}}"
+WANDB_RUN_NAME="${WANDB_RUN_NAME:-${RUN_BASENAME}}"
 WANDB_MODE="${WANDB_MODE:-online}"
+WANDB_DIR="${WANDB_DIR:-${OUTPUT_ROOT}/wandb}"
+WANDB_CACHE_DIR="${WANDB_CACHE_DIR:-${OUTPUT_ROOT}/wandb_cache}"
+WANDB_DATA_DIR="${WANDB_DATA_DIR:-${OUTPUT_ROOT}/wandb_data}"
+XDG_CACHE_HOME="${XDG_CACHE_HOME:-${OUTPUT_ROOT}/.cache}"
+CUDA_CACHE_PATH="${CUDA_CACHE_PATH:-${OUTPUT_ROOT}/cuda_cache}"
+TORCH_HOME="${TORCH_HOME:-${OUTPUT_ROOT}/torch_cache}"
+TMPDIR="${TMPDIR:-${OUTPUT_ROOT}/tmp}"
 
 if [[ -z "${WANDB_ENTITY}" ]]; then
   echo "Set WANDB_ENTITY to your W&B entity slug before running." >&2
@@ -138,6 +152,16 @@ fi
 
 cd "${REPO_ROOT}"
 
+mkdir -p \
+  "${OUTPUT_ROOT}/logs/rl_games/Assembly" \
+  "${WANDB_DIR}" \
+  "${WANDB_CACHE_DIR}" \
+  "${WANDB_DATA_DIR}" \
+  "${XDG_CACHE_HOME}" \
+  "${CUDA_CACHE_PATH}" \
+  "${TORCH_HOME}" \
+  "${TMPDIR}"
+
 if [[ "${DISASSEMBLY_TRAJ}" == *"://"* || "${DISASSEMBLY_TRAJ}" = /* ]]; then
   DISASSEMBLY_TRAJ_DISPLAY="${DISASSEMBLY_TRAJ}"
 else
@@ -145,6 +169,8 @@ else
 fi
 
 echo "[AutoMate] Repository: ${REPO_ROOT}"
+echo "[AutoMate] Output root: ${OUTPUT_ROOT}"
+echo "[AutoMate] Run output: ${RUN_NAME}"
 echo "[AutoMate] Training assembly policy for assembly_id=${ASSEMBLY_ID}"
 echo "[AutoMate] Disassembly trajectory: ${DISASSEMBLY_TRAJ_DISPLAY}"
 echo "[AutoMate] W&B: entity=${WANDB_ENTITY}, project=${WANDB_PROJECT_NAME}, run=${WANDB_RUN_NAME}, mode=${WANDB_MODE}"
@@ -177,6 +203,7 @@ export CUDA_VISIBLE_DEVICES="${GPU_ID}"
 export NUMBA_CUDA_LOW_OCCUPANCY_WARNINGS="${NUMBA_CUDA_LOW_OCCUPANCY_WARNINGS:-0}"
 export WANDB_MODE="${WANDB_MODE}"
 export WANDB_DISABLE_CODE="${WANDB_DISABLE_CODE:-true}"
+export WANDB_DIR WANDB_CACHE_DIR WANDB_DATA_DIR XDG_CACHE_HOME CUDA_CACHE_PATH TORCH_HOME TMPDIR
 
 echo "[AutoMate] Starting assembly training..."
 echo "[AutoMate] Command: ./isaaclab.sh -p scripts/reinforcement_learning/rl_games/train.py --task=Isaac-AutoMate-Assembly-Direct-v0 ..."
