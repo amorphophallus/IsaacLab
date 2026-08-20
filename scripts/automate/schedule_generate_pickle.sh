@@ -19,6 +19,8 @@ Required environment:
 
 Optional environment:
   TASK_IDS            Comma/space separated task IDs. Default: all discovered checkpoints.
+  INCLUDE_00032       If true, include task 00032 in the selected queue.
+                      Default: false
   CHECKPOINT_ROOT     Checkpoint directory. Default:
                       /mnt/nas/share2/home/lq/logs/rl_games/Assembly
   NUM_SUCCESSES       Target success pickle count per task. Default: 100
@@ -38,8 +40,9 @@ Advanced/testing overrides:
 Output layout:
   PICKLE_OUTPUT_ROOT/<assembly_id>/success/*.pkl
 
-The task 00032 is always excluded. Existing success pickles are counted and only
-the missing amount is collected; tasks already at or above NUM_SUCCESSES are skipped.
+The task 00032 is excluded by default; set INCLUDE_00032=true to include it.
+Existing success pickles are counted and only the missing amount is collected;
+tasks already at or above NUM_SUCCESSES are skipped.
 EOF
 }
 
@@ -458,7 +461,7 @@ fi
 declare -a SELECTED_IDS=()
 declare -a EXCLUDED_IDS=()
 for task_id in "${REQUESTED_IDS[@]}"; do
-  if [[ "${task_id}" == "00032" ]]; then
+  if [[ "${task_id}" == "00032" ]] && ! is_truthy "${INCLUDE_00032:-0}"; then
     EXCLUDED_IDS+=("${task_id}")
     continue
   fi
