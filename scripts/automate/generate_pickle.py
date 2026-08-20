@@ -55,6 +55,13 @@ parser.add_argument(
     action="store_true",
     help="Use the policy mean. The default samples from the PPO action distribution.",
 )
+parser.add_argument(
+    "--enable-sbc",
+    "--sbc",
+    dest="enable_sbc",
+    action="store_true",
+    help="Enable the sampling-based curriculum. The default evaluates at the hardest curriculum stage.",
+)
 parser.add_argument("--seed", type=int, default=0, help="Environment and RL-Games seed.")
 parser.add_argument(
     "--disassembly-path",
@@ -124,7 +131,7 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: dict):
 
     task_cfg = env_cfg.tasks[env_cfg.task_name]
     task_cfg.assembly_id = args_cli.assembly_id
-    task_cfg.if_sbc = False
+    task_cfg.if_sbc = args_cli.enable_sbc
     task_cfg.if_logging_eval = False
     if args_cli.disassembly_path is not None:
         task_cfg.disassembly_path_json = args_cli.disassembly_path
@@ -184,6 +191,7 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: dict):
     print(f"[INFO] Task label: {task_label}")
     print(f"[INFO] Target successes: {args_cli.num_successes}; max attempts: {max_attempts}; max steps: {max_steps}")
     print(f"[INFO] Policy mode: {'deterministic' if args_cli.deterministic else 'stochastic'}")
+    print(f"[INFO] Sampling-based curriculum: {'enabled' if args_cli.enable_sbc else 'disabled'}")
 
     try:
         for attempt_idx in range(1, max_attempts + 1):
