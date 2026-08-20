@@ -150,6 +150,13 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: dict):
     resume_path = retrieve_file_path(args_cli.checkpoint)
     log_dir = os.path.dirname(os.path.dirname(resume_path))
     env_cfg.log_dir = log_dir
+    if args_cli.disassembly_path is None:
+        cached_disassembly_path = os.path.join(log_dir, "assets", "disassemble_traj.json")
+        if os.path.isfile(cached_disassembly_path):
+            task_cfg.disassembly_path_json = cached_disassembly_path
+            print(
+                f"[INFO] Using checkpoint-cached disassembly trajectory: {cached_disassembly_path}"
+            )
 
     rl_device = agent_cfg["params"]["config"]["device"]
     clip_obs = agent_cfg["params"]["env"].get("clip_observations", math.inf)
