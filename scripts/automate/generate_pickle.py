@@ -191,6 +191,10 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: dict):
                 break
             attempts_completed = attempt_idx
             observation = _reset_policy_episode(env, agent)
+            # Manual resets do not pass through AssemblyEnv._pre_physics_step(),
+            # so the previous episode's latched first-hit status must be cleared.
+            # Otherwise every rollout after the first success terminates in one step.
+            raw_env.ep_succeeded.zero_()
             recorder = PickleRecorder(env_idx=0)
             recorder.start_episode(raw_env)
             success = False
