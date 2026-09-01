@@ -198,7 +198,7 @@ def test_production_generator_has_maintained_vectorized_exact_quota_path():
         / "automate"
         / "assembly_env.py"
     ).read_text()
-    mesh_source = (
+    reward_mesh_source = (
         automate_root
         / "source"
         / "isaaclab_tasks"
@@ -206,6 +206,15 @@ def test_production_generator_has_maintained_vectorized_exact_quota_path():
         / "direct"
         / "automate"
         / "industreal_algo_utils.py"
+    ).read_text()
+    gripper_mesh_source = (
+        automate_root
+        / "source"
+        / "isaaclab_tasks"
+        / "isaaclab_tasks"
+        / "direct"
+        / "automate"
+        / "automate_algo_utils.py"
     ).read_text()
     scheduler_source = (
         automate_root / "scripts" / "automate" / "schedule_generate_pickle.sh"
@@ -224,9 +233,11 @@ def test_production_generator_has_maintained_vectorized_exact_quota_path():
     assert 'prim_path="/World/envs/env_.*/Robot/panda_hand/wrist_camera"' in camera_cfg_source
     assert 'prim_path="/World/envs/env_.*/front_camera"' in camera_cfg_source
     assert "cfg.scene.num_envs != 1" not in env_source
-    assert "load(resolved_held_asset_obj)" in mesh_source
-    assert "load(resolved_fixed_asset_obj)" in mesh_source
-    assert "load(os.path.basename" not in mesh_source
+    assert "load(resolved_held_asset_obj)" in reward_mesh_source
+    assert "load(resolved_fixed_asset_obj)" in reward_mesh_source
+    assert "load(os.path.basename" not in reward_mesh_source
+    assert "trimesh.load_mesh(resolved_obj_filepath)" in gripper_mesh_source
+    assert "trimesh.load_mesh(os.path.basename" not in gripper_mesh_source
     assert "--annotation-source scripted" in scheduler_source
     assert "--deterministic" in scheduler_source
     assert "--compress" in scheduler_source
