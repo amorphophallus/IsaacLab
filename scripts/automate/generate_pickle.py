@@ -50,7 +50,8 @@ parser.add_argument(
     required=True,
     help="Output root; success/failure folders are created below it.",
 )
-parser.add_argument("--num-successes", type=int, default=100, help="Number of successful trajectories to save.")
+parser.add_argument("--num-envs", type=int, default=1, help="Number of vectorized rollout environments.")
+parser.add_argument("--num-successes", type=int, default=50, help="Number of successful trajectories to save.")
 parser.add_argument(
     "--max-attempts",
     type=int,
@@ -71,16 +72,28 @@ parser.add_argument(
 )
 parser.add_argument("--compress", action="store_true", help="Write .pkl.xz instead of uncompressed .pkl files.")
 parser.add_argument(
+    "--writer-workers",
+    type=int,
+    default=2,
+    help="Background workers used for strict validation and pickle writes.",
+)
+parser.add_argument(
+    "--max-pending-writes",
+    type=int,
+    default=None,
+    help="Bounded validation/write queue size. Defaults to max(num_envs, 2*writer_workers).",
+)
+parser.add_argument(
     "--deterministic",
     action="store_true",
-    help="Use the policy mean. The default samples from the PPO action distribution.",
+    help="Required production mode: use the specialist policy mean.",
 )
 parser.add_argument(
     "--enable-sbc",
     "--sbc",
     dest="enable_sbc",
     action="store_true",
-    help="Enable the sampling-based curriculum. The default evaluates at the hardest curriculum stage.",
+    help="Rejected by the production collector; retained only for an explicit fail-closed error.",
 )
 parser.add_argument("--seed", type=int, default=0, help="Environment and RL-Games seed.")
 parser.add_argument(
@@ -99,8 +112,13 @@ simulation_app = app_launcher.app
 
 # Simulation and learning imports follow app launch.
 
+import hashlib
+import json
 import math
 import os
+import time
+from concurrent.futures import ALL_COMPLETED, FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from pathlib import Path
 
 import gymnasium as gym
 import torch
@@ -114,7 +132,11 @@ from isaaclab.utils.assets import retrieve_file_path
 from isaaclab_rl.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper
 
 import isaaclab_tasks  # noqa: F401
-from isaaclab_tasks.direct.automate.data_collection import PickleRecorder, write_trajectory
+from isaaclab_tasks.direct.automate.data_collection import (
+    PickleRecorder,
+    classify_batch_results,
+    write_trajectory,
+)
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 
@@ -122,7 +144,7 @@ def _policy_observation(observation):
     return observation["obs"] if isinstance(observation, dict) else observation
 
 
-def _reset_policy_episode(env: RlGamesVecEnvWrapper, agent: BasePlayer):
+def _reset_policy_batch(env: RlGamesVecEnvWrapper, agent: BasePlayer):
     observation = _policy_observation(env.reset())
     _ = agent.get_batch_size(observation, 1)
     if agent.is_rnn:
@@ -130,19 +152,131 @@ def _reset_policy_episode(env: RlGamesVecEnvWrapper, agent: BasePlayer):
     return observation
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _finalize_attempt(
+    recorder: PickleRecorder,
+    *,
+    success: bool,
+    classification: str,
+    task: str,
+    output_dir: Path,
+    attempt_idx: int,
+    compress: bool,
+    save_failures: bool,
+) -> dict:
+    """Strictly validate one finished attempt and optionally publish its pickle."""
+
+    started_at = time.perf_counter()
+    trajectory = recorder.finish_episode(success=success, task=task)
+    should_write = classification == "selected" or (classification == "failure" and save_failures)
+    output_path = None
+    output_bytes = 0
+    output_sha256 = None
+    if should_write:
+        output_path = write_trajectory(
+            trajectory,
+            output_dir,
+            attempt_idx=attempt_idx,
+            compress=compress,
+        )
+        output_bytes = output_path.stat().st_size
+        output_sha256 = _sha256_file(output_path)
+    return {
+        "classification": classification,
+        "success": success,
+        "saved": output_path is not None,
+        "relative_path": str(output_path.relative_to(output_dir)) if output_path is not None else None,
+        "output_bytes": output_bytes,
+        "output_sha256": output_sha256,
+        "num_transitions": len(trajectory["actions"]),
+        "validation_write_seconds": time.perf_counter() - started_at,
+    }
+
+
+def _drain_attempts(
+    pending: dict[Future, dict],
+    records: list[dict],
+    *,
+    all_completed: bool,
+) -> None:
+    if not pending:
+        return
+    done, _not_done = wait(
+        pending,
+        return_when=ALL_COMPLETED if all_completed else FIRST_COMPLETED,
+    )
+    for future in done:
+        base_record = pending.pop(future)
+        records.append({**base_record, **future.result()})
+
+
+def _atomic_write_json(path: Path, payload) -> None:
+    temporary_path = path.with_name(f".{path.name}.tmp")
+    with temporary_path.open("w", encoding="utf-8") as stream:
+        json.dump(payload, stream, indent=2, sort_keys=True)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary_path, path)
+    _fsync_directory(path.parent)
+
+
+def _atomic_write_jsonl(path: Path, records: list[dict]) -> None:
+    temporary_path = path.with_name(f".{path.name}.tmp")
+    with temporary_path.open("w", encoding="utf-8") as stream:
+        for record in sorted(records, key=lambda item: item["global_attempt_idx"]):
+            stream.write(json.dumps(record, sort_keys=True) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary_path, path)
+    _fsync_directory(path.parent)
+
+
+def _fsync_directory(path: Path) -> None:
+    directory_fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: DirectRLEnvCfg, agent_cfg: dict):
     """Load an AutoMate checkpoint and collect RR-compatible rollouts."""
 
+    if args_cli.num_envs <= 0:
+        raise ValueError("--num-envs must be positive.")
+    if args_cli.num_envs > 32:
+        raise ValueError("--num-envs above 32 has not passed the production camera/schema gate.")
     if args_cli.num_successes <= 0:
         raise ValueError("--num-successes must be positive.")
+    if not args_cli.deterministic:
+        raise ValueError("Production AutoMate collection requires --deterministic.")
+    if args_cli.enable_sbc:
+        raise ValueError("Production AutoMate collection forbids --enable-sbc; use hardest initialization.")
+    if args_cli.writer_workers <= 0:
+        raise ValueError("--writer-workers must be positive.")
+    max_pending_writes = args_cli.max_pending_writes
+    if max_pending_writes is None:
+        max_pending_writes = max(args_cli.num_envs, 2 * args_cli.writer_workers)
+    if max_pending_writes <= 0:
+        raise ValueError("--max-pending-writes must be positive.")
+    if max_pending_writes < args_cli.writer_workers:
+        raise ValueError("--max-pending-writes must be at least --writer-workers.")
     max_attempts = args_cli.max_attempts
     if max_attempts is None:
         max_attempts = args_cli.num_successes * 10
     if max_attempts <= 0:
         raise ValueError("--max-attempts must be positive.")
 
-    env_cfg.scene.num_envs = 1
+    env_cfg.scene.num_envs = args_cli.num_envs
     if args_cli.device is not None:
         env_cfg.sim.device = args_cli.device
     env_cfg.seed = args_cli.seed
@@ -189,6 +323,14 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: dict):
     obs_groups = agent_cfg["params"]["env"].get("obs_groups")
     concatenate_obs_groups = agent_cfg["params"]["env"].get("concate_obs_groups", True)
 
+    output_dir = Path(args_cli.output_dir).expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=False)
+    incomplete_marker = output_dir / ".collection-incomplete"
+    incomplete_marker.write_text(
+        f"started_epoch={time.time()}\nannotation_source={args_cli.annotation_source}\n",
+        encoding="utf-8",
+    )
+
     gym_env = gym.make(args_cli.task, cfg=env_cfg)
     raw_env = gym_env.unwrapped
 
@@ -233,7 +375,7 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: dict):
 
     agent_cfg["params"]["load_checkpoint"] = True
     agent_cfg["params"]["load_path"] = resume_path
-    agent_cfg["params"]["config"]["num_actors"] = 1
+    agent_cfg["params"]["config"]["num_actors"] = args_cli.num_envs
     runner = Runner()
     runner.load(agent_cfg)
     agent: BasePlayer = runner.create_player()
@@ -241,29 +383,52 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: dict):
     agent.reset()
 
     task_label = f"automate_insertion_{args_cli.assembly_id}"
-    successful_episodes = 0
-    saved_failures = 0
+    selected_episodes = 0
+    observed_successes = 0
+    excluded_successes = 0
     attempts_completed = 0
+    batch_index = 0
+    pending: dict[Future, dict] = {}
+    attempt_records: list[dict] = []
+    collection_start = time.perf_counter()
     print(f"[INFO] Checkpoint: {resume_path}")
     print(f"[INFO] Task label: {task_label}")
     print(f"[INFO] Annotation source: {args_cli.annotation_source}")
-    print(f"[INFO] Target successes: {args_cli.num_successes}; max attempts: {max_attempts}; max steps: {max_steps}")
+    print(
+        f"[INFO] Environments: {args_cli.num_envs}; target successes: {args_cli.num_successes}; "
+        f"max attempts: {max_attempts}; max steps: {max_steps}"
+    )
+    print(
+        f"[INFO] Writer workers: {args_cli.writer_workers}; "
+        f"max pending validations/writes: {max_pending_writes}"
+    )
     print(f"[INFO] Policy mode: {'deterministic' if args_cli.deterministic else 'stochastic'}")
     print(f"[INFO] Sampling-based curriculum: {'enabled' if args_cli.enable_sbc else 'disabled'}")
 
+    executor = ThreadPoolExecutor(
+        max_workers=args_cli.writer_workers,
+        thread_name_prefix="automate-pickle-writer",
+    )
     try:
-        for attempt_idx in range(1, max_attempts + 1):
-            if not simulation_app.is_running() or successful_episodes >= args_cli.num_successes:
-                break
-            attempts_completed = attempt_idx
-            observation = _reset_policy_episode(env, agent)
+        while (
+            simulation_app.is_running()
+            and attempts_completed < max_attempts
+            and selected_episodes < args_cli.num_successes
+        ):
+            batch_index += 1
+            active_envs = min(args_cli.num_envs, max_attempts - attempts_completed)
+            observation = _reset_policy_batch(env, agent)
             # Manual resets do not pass through AssemblyEnv._pre_physics_step(),
             # so the previous episode's latched first-hit status must be cleared.
             # Otherwise every rollout after the first success terminates in one step.
             raw_env.ep_succeeded.zero_()
-            recorder = PickleRecorder(env_idx=0)
-            recorder.start_episode(raw_env)
-            success = False
+            recorders = [PickleRecorder(env_idx=env_idx) for env_idx in range(active_envs)]
+            for recorder in recorders:
+                recorder.start_episode(raw_env)
+            completed = torch.zeros(args_cli.num_envs, dtype=torch.bool, device=raw_env.device)
+            if active_envs < args_cli.num_envs:
+                completed[active_envs:] = True
+            succeeded = torch.zeros_like(completed)
 
             for _step_idx in range(max_steps):
                 with torch.inference_mode():
@@ -273,53 +438,159 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: dict):
                 # simulation buffers must remain mutable across manual resets.
                 clipped_action = policy_action.detach().clone()
                 clipped_action.clamp_(-clip_actions, clip_actions)
-                rr_action = recorder.prepare_action(raw_env, clipped_action)
+                if bool(torch.any(completed).item()):
+                    clipped_action[completed] = 0.0
+                rr_actions = {
+                    env_idx: recorders[env_idx].prepare_action(raw_env, clipped_action)
+                    for env_idx in range(active_envs)
+                    if not bool(completed[env_idx].item())
+                }
                 next_observation, _dense_reward, dones, _extras = env.step(clipped_action)
                 observation = _policy_observation(next_observation)
-                success = bool(raw_env.ep_succeeded[0].item())
-                recorder.record_step(raw_env, rr_action, success)
-                if success:
-                    break
-                if bool(torch.any(dones).item()):
+                for env_idx, rr_action in rr_actions.items():
+                    success = bool(raw_env.ep_succeeded[env_idx].item())
+                    recorders[env_idx].record_step(raw_env, rr_action, success)
+                    if success:
+                        succeeded[env_idx] = True
+                        completed[env_idx] = True
+                unexpected_done = torch.as_tensor(dones, device=raw_env.device, dtype=torch.bool) & ~completed
+                if bool(torch.any(unexpected_done).item()):
                     raise RuntimeError(
                         "AutoMate auto-reset before the collector boundary; increase the configured safety horizon."
                     )
+                if bool(torch.all(completed).item()):
+                    break
 
-            trajectory = recorder.finish_episode(success=success, task=task_label)
-            if success:
-                output_path = write_trajectory(
-                    trajectory,
-                    args_cli.output_dir,
+            success_flags = [bool(succeeded[env_idx].item()) for env_idx in range(active_envs)]
+            classifications = classify_batch_results(
+                success_flags,
+                args_cli.num_successes - selected_episodes,
+            )
+            batch_selected = classifications.count("selected")
+            batch_excluded = classifications.count("excluded")
+            selected_episodes += batch_selected
+            observed_successes += sum(success_flags)
+            excluded_successes += batch_excluded
+
+            for env_idx, (recorder, success, classification) in enumerate(
+                zip(recorders, success_flags, classifications, strict=True)
+            ):
+                attempts_completed += 1
+                attempt_idx = attempts_completed
+                while len(pending) >= max_pending_writes:
+                    _drain_attempts(pending, attempt_records, all_completed=False)
+                future = executor.submit(
+                    _finalize_attempt,
+                    recorder,
+                    success=success,
+                    classification=classification,
+                    task=task_label,
+                    output_dir=output_dir,
                     attempt_idx=attempt_idx,
                     compress=args_cli.compress,
+                    save_failures=args_cli.save_failures,
                 )
-                successful_episodes += 1
-                print(
-                    f"[INFO] Saved success {successful_episodes}/{args_cli.num_successes} "
-                    f"from attempt {attempt_idx}: {output_path}"
-                )
-            elif args_cli.save_failures:
-                output_path = write_trajectory(
-                    trajectory,
-                    args_cli.output_dir,
-                    attempt_idx=attempt_idx,
-                    compress=args_cli.compress,
-                )
-                saved_failures += 1
-                print(f"[INFO] Saved failure from attempt {attempt_idx}: {output_path}")
-            else:
-                print(f"[INFO] Discarded failed attempt {attempt_idx}.")
+                pending[future] = {
+                    "assembly_id": args_cli.assembly_id,
+                    "task": task_label,
+                    "process_seed": args_cli.seed,
+                    "batch_index": batch_index,
+                    "env_idx": env_idx,
+                    "global_attempt_idx": attempt_idx,
+                    "annotation_source": args_cli.annotation_source,
+                    "image_annotation_mode": "none",
+                    "randomness_semantics": "hardest_init",
+                    "init_mode": "sbc" if args_cli.enable_sbc else "hardest",
+                    "policy_mode": "deterministic" if args_cli.deterministic else "stochastic",
+                }
+            _drain_attempts(pending, attempt_records, all_completed=False)
+            elapsed = time.perf_counter() - collection_start
+            attempts_per_hour = attempts_completed * 3600.0 / elapsed
+            print(
+                f"[INFO] Batch {batch_index}: attempts={attempts_completed}/{max_attempts}, "
+                f"selected={selected_episodes}/{args_cli.num_successes}, "
+                f"observed_successes={observed_successes}, excluded_successes={excluded_successes}, "
+                f"pending_writes={len(pending)}, attempted_rollouts_per_hour={attempts_per_hour:.2f}"
+            )
+
+        _drain_attempts(pending, attempt_records, all_completed=True)
     finally:
+        executor.shutdown(wait=True, cancel_futures=False)
         env.close()
 
-    print(
-        f"[INFO] Collection summary: attempts={attempts_completed}, successes={successful_episodes}, "
-        f"saved_failures={saved_failures}."
-    )
-    if successful_episodes < args_cli.num_successes:
+    collection_seconds = time.perf_counter() - collection_start
+    attempt_records.sort(key=lambda item: item["global_attempt_idx"])
+    if len(attempt_records) != attempts_completed:
         raise RuntimeError(
-            f"Collected only {successful_episodes}/{args_cli.num_successes} successes within {max_attempts} attempts."
+            f"Attempt manifest count mismatch: records={len(attempt_records)}, attempts={attempts_completed}."
         )
+    saved_selected = sum(
+        record["classification"] == "selected" and record["saved"] for record in attempt_records
+    )
+    if saved_selected != selected_episodes:
+        raise RuntimeError(
+            f"Selected output count mismatch: files={saved_selected}, selected={selected_episodes}."
+        )
+    saved_failures = sum(
+        record["classification"] == "failure" and record["saved"] for record in attempt_records
+    )
+    selected_transitions = sum(
+        record["num_transitions"] for record in attempt_records if record["classification"] == "selected"
+    )
+    selected_bytes = sum(
+        record["output_bytes"] for record in attempt_records if record["classification"] == "selected"
+    )
+    complete = selected_episodes == args_cli.num_successes
+    disassembly_path = Path(task_cfg.disassembly_path_json).expanduser()
+    summary = {
+        "schema": "rr-automate-production-collection-v1",
+        "complete": complete,
+        "assembly_id": args_cli.assembly_id,
+        "task": task_label,
+        "annotation_source": args_cli.annotation_source,
+        "image_annotation_mode": "none",
+        "randomness_semantics": "hardest_init",
+        "init_mode": "sbc" if args_cli.enable_sbc else "hardest",
+        "policy_mode": "deterministic" if args_cli.deterministic else "stochastic",
+        "process_seed": args_cli.seed,
+        "num_envs": args_cli.num_envs,
+        "target_successes": args_cli.num_successes,
+        "max_attempts": max_attempts,
+        "max_steps": max_steps,
+        "attempts_completed": attempts_completed,
+        "selected_successes": selected_episodes,
+        "observed_successes": observed_successes,
+        "excluded_successes": excluded_successes,
+        "saved_failures": saved_failures,
+        "selected_transitions": selected_transitions,
+        "selected_output_bytes": selected_bytes,
+        "collection_seconds": collection_seconds,
+        "attempted_rollouts_per_hour": attempts_completed * 3600.0 / collection_seconds,
+        "writer_workers": args_cli.writer_workers,
+        "max_pending_writes": max_pending_writes,
+        "checkpoint": str(resume_path),
+        "checkpoint_sha256": _sha256_file(Path(resume_path)),
+        "disassembly_path": str(task_cfg.disassembly_path_json),
+        "disassembly_sha256": _sha256_file(disassembly_path) if disassembly_path.is_file() else None,
+    }
+    _atomic_write_jsonl(output_dir / "attempt_manifest.jsonl", attempt_records)
+    _atomic_write_json(output_dir / "collection_summary.json", summary)
+    print(
+        f"[INFO] Collection summary: attempts={attempts_completed}, selected={selected_episodes}, "
+        f"observed_successes={observed_successes}, excluded_successes={excluded_successes}, "
+        f"saved_failures={saved_failures}, attempted_rollouts_per_hour="
+        f"{summary['attempted_rollouts_per_hour']:.2f}."
+    )
+    if not complete:
+        raise RuntimeError(
+            f"Collected only {selected_episodes}/{args_cli.num_successes} successes within {max_attempts} attempts."
+        )
+    (output_dir / ".collection-complete").write_text(
+        f"selected_successes={selected_episodes}\nattempts={attempts_completed}\n",
+        encoding="utf-8",
+    )
+    incomplete_marker.unlink()
+    _fsync_directory(output_dir)
 
 
 if __name__ == "__main__":

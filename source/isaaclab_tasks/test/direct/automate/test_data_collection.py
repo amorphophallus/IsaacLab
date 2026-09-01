@@ -34,6 +34,7 @@ from data_collection import (  # noqa: E402
     PickleRecorder,
     StateAdapter,
     TrajectoryValidationError,
+    classify_batch_results,
     validate_trajectory,
     write_trajectory,
 )
@@ -174,6 +175,69 @@ def test_production_generator_requires_scripted_and_excludes_00755():
         isinstance(node, ast.FunctionDef) and node.name == "_normalize_assembly_id"
         for node in tree.body
     )
+
+
+def test_production_generator_has_maintained_vectorized_exact_quota_path():
+    automate_root = Path(__file__).resolve().parents[5]
+    generator_source = (automate_root / "scripts" / "automate" / "generate_pickle.py").read_text()
+    camera_cfg_source = (
+        automate_root
+        / "source"
+        / "isaaclab_tasks"
+        / "isaaclab_tasks"
+        / "direct"
+        / "automate"
+        / "assembly_env_cfg.py"
+    ).read_text()
+    env_source = (
+        automate_root
+        / "source"
+        / "isaaclab_tasks"
+        / "isaaclab_tasks"
+        / "direct"
+        / "automate"
+        / "assembly_env.py"
+    ).read_text()
+    scheduler_source = (
+        automate_root / "scripts" / "automate" / "schedule_generate_pickle.sh"
+    ).read_text()
+
+    assert '"--num-envs"' in generator_source
+    assert '"--writer-workers"' in generator_source
+    assert '"--max-pending-writes"' in generator_source
+    assert "ThreadPoolExecutor" in generator_source
+    assert "classify_batch_results" in generator_source
+    assert "attempt_manifest.jsonl" in generator_source
+    assert "collection_summary.json" in generator_source
+    assert "output_dir.mkdir(parents=True, exist_ok=False)" in generator_source
+    assert "Production AutoMate collection requires --deterministic." in generator_source
+    assert "Production AutoMate collection forbids --enable-sbc" in generator_source
+    assert 'prim_path="/World/envs/env_.*/Robot/panda_hand/wrist_camera"' in camera_cfg_source
+    assert 'prim_path="/World/envs/env_.*/front_camera"' in camera_cfg_source
+    assert "cfg.scene.num_envs != 1" not in env_source
+    assert "--annotation-source scripted" in scheduler_source
+    assert "--deterministic" in scheduler_source
+    assert "--compress" in scheduler_source
+    assert "--num-envs" in scheduler_source
+    assert "--num-successes" in scheduler_source
+    assert 'NUM_SUCCESSES_RAW="${NUM_SUCCESSES:-50}"' in scheduler_source
+    assert 'if [[ "${task_id}" == "00755" ]]' in scheduler_source
+    assert '[[ ! -e "${output_dir}" ]]' in scheduler_source
+    assert '.collection-complete' in scheduler_source
+
+
+def test_vectorized_batch_classification_enforces_exact_success_quota():
+    assert classify_batch_results([True, False, True, True], 2) == [
+        "selected",
+        "failure",
+        "selected",
+        "excluded",
+    ]
+    assert classify_batch_results([True, False], 0) == ["excluded", "failure"]
+    with pytest.raises(ValueError, match="non-negative"):
+        classify_batch_results([True], -1)
+    with pytest.raises(TypeError, match="must be bool"):
+        classify_batch_results([1], 1)
 
 
 def test_source_camera_intrinsics_match_fb_after_224_center_crop():

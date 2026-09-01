@@ -79,11 +79,8 @@ class AssemblyEnv(DirectRLEnv):
     @staticmethod
     def _configure_camera_mode(cfg: AssemblyEnvCfg):
         """Apply simulation settings required by the two standard RTX cameras."""
-        if cfg.scene.num_envs != 1:
-            raise ValueError(
-                "AutoMate camera output supports exactly one environment; "
-                f"received cfg.scene.num_envs={cfg.scene.num_envs}."
-            )
+        if cfg.scene.num_envs <= 0:
+            raise ValueError("AutoMate camera output requires at least one environment.")
         if cfg.camera.gpu_collision_stack_size <= 0:
             raise ValueError("cfg.camera.gpu_collision_stack_size must be positive.")
 

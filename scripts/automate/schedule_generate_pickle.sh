@@ -19,30 +19,34 @@ Required environment:
 
 Optional environment:
   TASK_IDS            Comma/space separated task IDs. Default: all discovered checkpoints.
-  INCLUDE_00032       If true, include task 00032 in the selected queue.
-                      Default: false
   CHECKPOINT_ROOT     Checkpoint directory. Default:
                       /mnt/nas/share2/home/lq/logs/rl_games/Assembly
-  NUM_SUCCESSES       Target success pickle count per task. Default: 100
-  MAX_ATTEMPTS        Attempt limit for each collector invocation. Default: 1000
-  BASE_SEED           Base used to derive a task/resume-specific seed. Default: 0
+  DISASSEMBLY_ROOT    AutoMate disassembly directory. Default:
+                      /mnt/nas/share/home/lq/IsaacLab/AutoMate
+  ASSET_ROOT          Verified local Isaac asset root. Required for collection.
+  NUM_SUCCESSES       Target selected success count per task. Default: 50
+  MAX_ATTEMPTS        Attempt limit for each collector invocation. Default: 10000
+  NUM_ENVS            Default vectorized environments per GPU. Default: 16
+  ENV32_TASK_IDS      Optional task IDs that use 32 envs instead of NUM_ENVS.
+  WRITER_WORKERS      Background validation/xz workers per collector. Default: 2
+  MAX_PENDING_WRITES  Bounded validation/write queue size. Default: NUM_ENVS
+  BASE_SEED           Base used to derive a task-specific seed. Default: 20901000
   POLL_SECONDS        Heartbeat interval while waiting for jobs. Default: 30
   LOG_DIR             Scheduler log directory. Default:
                       <PICKLE_OUTPUT_ROOT>_scheduler/<timestamp>
   DRY_RUN             If true, print the resolved schedule without launching collectors.
-  CONDA_ROOT          Conda installation root. Default: /mnt/nas/share/home/lq/miniconda3
-  CONDA_ENV           Conda environment name. Default: automate
+  CONDA_ROOT          Conda installation root. Default: /mnt/nas/share/home/hy/miniconda3
+  CONDA_ENV           Conda environment name. Default: rr-isaaclab-gpu-0821-20260822
 
 Advanced/testing overrides:
   ISAACLAB_LAUNCHER   Isaac Lab launcher. Default: <repo>/isaaclab.sh
   GENERATOR_SCRIPT    Pickle generator. Default: <repo>/scripts/automate/generate_pickle.py
 
 Output layout:
-  PICKLE_OUTPUT_ROOT/<assembly_id>/success/*.pkl
+  PICKLE_OUTPUT_ROOT/<assembly_id>/success/*.pkl.xz
 
-The task 00032 is excluded by default; set INCLUDE_00032=true to include it.
-Existing success pickles are counted and only the missing amount is collected;
-tasks already at or above NUM_SUCCESSES are skipped.
+Task 00755 is always excluded. Every selected task output must be absent at
+launch; production never mixes old pickles or resumes into an existing folder.
 EOF
 }
 
@@ -147,12 +151,10 @@ discover_checkpoints() {
   local -a checkpoint_paths=()
 
   shopt -s nullglob
-  checkpoint_paths=(
-    "${CHECKPOINT_ROOT}"/automate_assembly_*_2x_noise/nn/last_Assembly_ep_100_*.pth
-  )
+  checkpoint_paths=("${CHECKPOINT_ROOT}"/automate_assembly_*_2x_noise/nn/Assembly.pth)
   shopt -u nullglob
 
-  ((${#checkpoint_paths[@]} > 0)) || die "No ep_100 checkpoints found under ${CHECKPOINT_ROOT}"
+  ((${#checkpoint_paths[@]} > 0)) || die "No Assembly.pth checkpoints found under ${CHECKPOINT_ROOT}"
 
   for checkpoint_path in "${checkpoint_paths[@]}"; do
     [[ -f "${checkpoint_path}" ]] || die "Checkpoint is not a regular file: ${checkpoint_path}"
@@ -166,7 +168,7 @@ discover_checkpoints() {
     assembly_id="${BASH_REMATCH[1]}"
 
     if [[ -n "${CHECKPOINT_BY_ID[${assembly_id}]:-}" ]]; then
-      die "Multiple ep_100 checkpoints found for assembly_id=${assembly_id}: ${CHECKPOINT_BY_ID[${assembly_id}]} and ${checkpoint_path}"
+      die "Multiple Assembly.pth checkpoints found for assembly_id=${assembly_id}: ${CHECKPOINT_BY_ID[${assembly_id}]} and ${checkpoint_path}"
     fi
 
     CHECKPOINT_BY_ID["${assembly_id}"]="${checkpoint_path}"
@@ -233,31 +235,48 @@ launch_task() {
   local initial_successes="${INITIAL_SUCCESSES[${assembly_id}]}"
   local requested_successes="${REMAINING_SUCCESSES[${assembly_id}]}"
   local task_seed="${TASK_SEEDS[${assembly_id}]}"
+  local disassembly_path="${DISASSEMBLY_ROOT}/${assembly_id}/disassemble_traj.json"
+  local num_envs="${NUM_ENVS}"
   local log_path="${LOG_DIR}/${assembly_id}_gpu${gpu_id}.log"
   local start_time
   local pid
+  if [[ -n "${ENV32_SET[${assembly_id}]:-}" ]]; then
+    num_envs=32
+  fi
+  [[ -f "${disassembly_path}" ]] || die "Missing disassembly trajectory: ${disassembly_path}"
   local -a command=(
     "${ISAACLAB_LAUNCHER}"
     -p
     "${GENERATOR_SCRIPT}"
     --checkpoint "${checkpoint_path}"
     --assembly-id "${assembly_id}"
+    --annotation-source scripted
+    --disassembly-path "${disassembly_path}"
     --output-dir "${output_dir}"
+    --num-envs "${num_envs}"
     --num-successes "${requested_successes}"
     --max-attempts "${MAX_ATTEMPTS}"
+    --writer-workers "${WRITER_WORKERS}"
+    --max-pending-writes "${MAX_PENDING_WRITES}"
+    --compress
+    --deterministic
+    --skip-dense-reward
     --seed "${task_seed}"
     --headless
     --device cuda:0
   )
 
   start_time="$(date -Is)"
-  echo "[Scheduler] Launch assembly_id=${assembly_id} on GPU=${gpu_id}; existing=${initial_successes}; collect=${requested_successes}; log=${log_path}"
+  echo "[Scheduler] Launch assembly_id=${assembly_id} on GPU=${gpu_id}; num_envs=${num_envs}; collect=${requested_successes}; log=${log_path}"
 
   {
     echo "[Collector] Assembly ID: ${assembly_id}"
     echo "[Collector] Physical GPU: ${gpu_id}; process device: cuda:0"
     echo "[Collector] Checkpoint: ${checkpoint_path}"
     echo "[Collector] Output: ${output_dir}"
+    echo "[Collector] Annotation source: scripted; image annotation mode: none"
+    echo "[Collector] Init: hardest; policy: deterministic; num envs: ${num_envs}"
+    echo "[Collector] Disassembly: ${disassembly_path}"
     echo "[Collector] Existing successes: ${initial_successes}; requested successes: ${requested_successes}"
     echo "[Collector] Seed: ${task_seed}; max attempts: ${MAX_ATTEMPTS}"
     printf "[Collector] Command:"
@@ -267,8 +286,11 @@ launch_task() {
 
   setsid env \
     CUDA_VISIBLE_DEVICES="${gpu_id}" \
+    OMNI_KIT_ACCEPT_EULA=YES \
     NUMBA_CUDA_LOW_OCCUPANCY_WARNINGS="${NUMBA_CUDA_LOW_OCCUPANCY_WARNINGS:-0}" \
+    PYTHONNOUSERSITE=1 \
     PYTHONUNBUFFERED=1 \
+    RR_ISAAC_ASSET_ROOT="${ASSET_ROOT}" \
     "${command[@]}" >>"${log_path}" 2>&1 &
 
   pid=$!
@@ -277,6 +299,7 @@ launch_task() {
   PID_TO_ID["${pid}"]="${assembly_id}"
   PID_TO_LOG["${pid}"]="${log_path}"
   PID_TO_START["${pid}"]="${start_time}"
+  PID_TO_NUM_ENVS["${pid}"]="${num_envs}"
 }
 
 complete_task() {
@@ -291,6 +314,7 @@ complete_task() {
   local initial_successes="${INITIAL_SUCCESSES[${assembly_id}]}"
   local requested_successes="${REMAINING_SUCCESSES[${assembly_id}]}"
   local task_seed="${TASK_SEEDS[${assembly_id}]}"
+  local num_envs="${PID_TO_NUM_ENVS[${pid}]}"
   local final_successes
   local end_time
   local status
@@ -305,7 +329,8 @@ complete_task() {
     FAILURES+=("${assembly_id}")
     printf "%s\n" "${assembly_id}" >>"${FAILED_FILE}"
     echo "[Scheduler] Terminated assembly_id=${assembly_id} on GPU=${gpu_id}; exit=${exit_code}; successes=${final_successes}/${NUM_SUCCESSES}"
-  elif ((exit_code == 0 && final_successes >= NUM_SUCCESSES)); then
+  elif ((exit_code == 0 && final_successes == NUM_SUCCESSES)) \
+    && [[ -f "${output_dir}/.collection-complete" ]]; then
     status="success"
     echo "[Scheduler] Done assembly_id=${assembly_id} on GPU=${gpu_id}; successes=${final_successes}/${NUM_SUCCESSES}"
   else
@@ -315,15 +340,16 @@ complete_task() {
     echo "[Scheduler] Failed assembly_id=${assembly_id} on GPU=${gpu_id}; exit=${exit_code}; successes=${final_successes}/${NUM_SUCCESSES}; log=${log_path}"
   fi
 
-  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
     "${assembly_id}" "${gpu_id}" "${pid}" "${checkpoint_path}" "${output_dir}" \
-    "${initial_successes}" "${requested_successes}" "${final_successes}" "${task_seed}" \
+    "${initial_successes}" "${requested_successes}" "${final_successes}" "${task_seed}" "${num_envs}" \
     "${start_time}" "${end_time}" "${status}" "${exit_code}" "${log_path}" >>"${SUMMARY_FILE}"
 
   unset "PID_TO_GPU[${pid}]"
   unset "PID_TO_ID[${pid}]"
   unset "PID_TO_LOG[${pid}]"
   unset "PID_TO_START[${pid}]"
+  unset "PID_TO_NUM_ENVS[${pid}]"
 }
 
 print_heartbeat() {
@@ -399,6 +425,7 @@ done
 command -v realpath >/dev/null 2>&1 || die "The realpath command is required"
 
 CHECKPOINT_ROOT="$(absolute_path "${CHECKPOINT_ROOT:-/mnt/nas/share2/home/lq/logs/rl_games/Assembly}")"
+DISASSEMBLY_ROOT="$(absolute_path "${DISASSEMBLY_ROOT:-/mnt/nas/share/home/lq/IsaacLab/AutoMate}")"
 if [[ -z "${PICKLE_OUTPUT_ROOT:-}" ]]; then
   die "PICKLE_OUTPUT_ROOT must be explicitly set to a location outside the repository and checkpoint tree"
 fi
@@ -407,20 +434,35 @@ ISAACLAB_LAUNCHER="$(absolute_path "${ISAACLAB_LAUNCHER:-${REPO_ROOT}/isaaclab.s
 GENERATOR_SCRIPT="$(absolute_path "${GENERATOR_SCRIPT:-${SCRIPT_DIR}/generate_pickle.py}")"
 
 [[ -d "${CHECKPOINT_ROOT}" ]] || die "Checkpoint root does not exist: ${CHECKPOINT_ROOT}"
+[[ -d "${DISASSEMBLY_ROOT}" ]] || die "Disassembly root does not exist: ${DISASSEMBLY_ROOT}"
+if [[ -z "${ASSET_ROOT:-}" ]]; then
+  die "ASSET_ROOT must point to the verified local Isaac asset root"
+fi
+ASSET_ROOT="$(absolute_path "${ASSET_ROOT}")"
+[[ -d "${ASSET_ROOT}" ]] || die "Asset root does not exist: ${ASSET_ROOT}"
 [[ "${PICKLE_OUTPUT_ROOT}" != "/" ]] || die "PICKLE_OUTPUT_ROOT cannot be the filesystem root"
 if path_is_within "${PICKLE_OUTPUT_ROOT}" "${CHECKPOINT_ROOT}" || path_is_within "${CHECKPOINT_ROOT}" "${PICKLE_OUTPUT_ROOT}"; then
   die "Checkpoint and pickle roots must be independent directory trees: checkpoint=${CHECKPOINT_ROOT}, output=${PICKLE_OUTPUT_ROOT}"
 fi
 
-NUM_SUCCESSES_RAW="${NUM_SUCCESSES:-100}"
-MAX_ATTEMPTS_RAW="${MAX_ATTEMPTS:-1000}"
-BASE_SEED_RAW="${BASE_SEED:-0}"
+NUM_SUCCESSES_RAW="${NUM_SUCCESSES:-50}"
+MAX_ATTEMPTS_RAW="${MAX_ATTEMPTS:-10000}"
+NUM_ENVS_RAW="${NUM_ENVS:-16}"
+WRITER_WORKERS_RAW="${WRITER_WORKERS:-2}"
+MAX_PENDING_WRITES_RAW="${MAX_PENDING_WRITES:-${NUM_ENVS_RAW}}"
+BASE_SEED_RAW="${BASE_SEED:-20901000}"
 POLL_SECONDS_RAW="${POLL_SECONDS:-30}"
 
 [[ "${NUM_SUCCESSES_RAW}" =~ ^[0-9]+$ ]] \
   || die "NUM_SUCCESSES must be a positive integer: ${NUM_SUCCESSES_RAW}"
 [[ "${MAX_ATTEMPTS_RAW}" =~ ^[0-9]+$ ]] \
   || die "MAX_ATTEMPTS must be a positive integer: ${MAX_ATTEMPTS_RAW}"
+[[ "${NUM_ENVS_RAW}" =~ ^[0-9]+$ ]] \
+  || die "NUM_ENVS must be a positive integer: ${NUM_ENVS_RAW}"
+[[ "${WRITER_WORKERS_RAW}" =~ ^[0-9]+$ ]] \
+  || die "WRITER_WORKERS must be a positive integer: ${WRITER_WORKERS_RAW}"
+[[ "${MAX_PENDING_WRITES_RAW}" =~ ^[0-9]+$ ]] \
+  || die "MAX_PENDING_WRITES must be a positive integer: ${MAX_PENDING_WRITES_RAW}"
 [[ "${BASE_SEED_RAW}" =~ ^[0-9]+$ ]] \
   || die "BASE_SEED must be a non-negative integer: ${BASE_SEED_RAW}"
 [[ "${POLL_SECONDS_RAW}" =~ ^[0-9]+$ ]] \
@@ -428,12 +470,30 @@ POLL_SECONDS_RAW="${POLL_SECONDS:-30}"
 
 NUM_SUCCESSES=$((10#${NUM_SUCCESSES_RAW}))
 MAX_ATTEMPTS=$((10#${MAX_ATTEMPTS_RAW}))
+NUM_ENVS=$((10#${NUM_ENVS_RAW}))
+WRITER_WORKERS=$((10#${WRITER_WORKERS_RAW}))
+MAX_PENDING_WRITES=$((10#${MAX_PENDING_WRITES_RAW}))
 BASE_SEED=$((10#${BASE_SEED_RAW}))
 POLL_SECONDS=$((10#${POLL_SECONDS_RAW}))
 
 ((NUM_SUCCESSES > 0)) || die "NUM_SUCCESSES must be positive: ${NUM_SUCCESSES_RAW}"
 ((MAX_ATTEMPTS > 0)) || die "MAX_ATTEMPTS must be positive: ${MAX_ATTEMPTS_RAW}"
+((NUM_ENVS > 0 && NUM_ENVS <= 32)) || die "NUM_ENVS must be within 1..32: ${NUM_ENVS_RAW}"
+((WRITER_WORKERS > 0)) || die "WRITER_WORKERS must be positive: ${WRITER_WORKERS_RAW}"
+((MAX_PENDING_WRITES >= WRITER_WORKERS)) \
+  || die "MAX_PENDING_WRITES must be at least WRITER_WORKERS"
 ((POLL_SECONDS > 0)) || die "POLL_SECONDS must be positive: ${POLL_SECONDS_RAW}"
+
+declare -A ENV32_SET=()
+if [[ -n "${ENV32_TASK_IDS:-}" ]]; then
+  declare -a RAW_ENV32_IDS=()
+  split_list "${ENV32_TASK_IDS}" RAW_ENV32_IDS
+  for raw_task_id in "${RAW_ENV32_IDS[@]}"; do
+    task_id="$(normalize_assembly_id "${raw_task_id}")"
+    [[ "${task_id}" != "00755" ]] || die "00755 cannot be scheduled"
+    ENV32_SET["${task_id}"]=1
+  done
+fi
 
 declare -A CHECKPOINT_BY_ID=()
 declare -a DISCOVERED_IDS=()
@@ -461,12 +521,12 @@ fi
 declare -a SELECTED_IDS=()
 declare -a EXCLUDED_IDS=()
 for task_id in "${REQUESTED_IDS[@]}"; do
-  if [[ "${task_id}" == "00032" ]] && ! is_truthy "${INCLUDE_00032:-0}"; then
+  if [[ "${task_id}" == "00755" ]]; then
     EXCLUDED_IDS+=("${task_id}")
     continue
   fi
   [[ -n "${CHECKPOINT_BY_ID[${task_id}]:-}" ]] \
-    || die "No unique ep_100 checkpoint found for requested assembly_id=${task_id} under ${CHECKPOINT_ROOT}"
+    || die "No unique Assembly.pth found for requested assembly_id=${task_id} under ${CHECKPOINT_ROOT}"
   SELECTED_IDS+=("${task_id}")
 done
 
@@ -499,13 +559,13 @@ declare -A INITIAL_SUCCESSES=()
 declare -A REMAINING_SUCCESSES=()
 declare -A TASK_SEEDS=()
 declare -a PENDING_IDS=()
-declare -a COMPLETED_IDS=()
 
 for task_id in "${SELECTED_IDS[@]}"; do
   output_dir="${PICKLE_OUTPUT_ROOT}/${task_id}"
-  existing_successes="$(count_success_pickles "${output_dir}")"
+  [[ ! -e "${output_dir}" ]] || die "Fresh task output already exists: ${output_dir}"
+  existing_successes=0
   task_decimal=$((10#${task_id}))
-  task_seed=$((BASE_SEED + task_decimal * 1000 + existing_successes))
+  task_seed=$((BASE_SEED + task_decimal * 1000))
   ((task_seed <= 2147483647)) \
     || die "Derived seed exceeds 2147483647 for assembly_id=${task_id}: ${task_seed}"
 
@@ -513,38 +573,35 @@ for task_id in "${SELECTED_IDS[@]}"; do
   INITIAL_SUCCESSES["${task_id}"]="${existing_successes}"
   TASK_SEEDS["${task_id}"]="${task_seed}"
 
-  if ((existing_successes >= NUM_SUCCESSES)); then
-    REMAINING_SUCCESSES["${task_id}"]=0
-    COMPLETED_IDS+=("${task_id}")
-  else
-    REMAINING_SUCCESSES["${task_id}"]=$((NUM_SUCCESSES - existing_successes))
-    PENDING_IDS+=("${task_id}")
-  fi
+  REMAINING_SUCCESSES["${task_id}"]="${NUM_SUCCESSES}"
+  PENDING_IDS+=("${task_id}")
 done
 
 LOG_DIR="$(absolute_path "${LOG_DIR:-${PICKLE_OUTPUT_ROOT}_scheduler/$(date +%Y%m%d_%H%M%S)}")"
 
 echo "[Scheduler] Repository: ${REPO_ROOT}"
 echo "[Scheduler] Checkpoint root: ${CHECKPOINT_ROOT}"
+echo "[Scheduler] Disassembly root: ${DISASSEMBLY_ROOT}"
+echo "[Scheduler] Asset root: ${ASSET_ROOT}"
 echo "[Scheduler] Pickle output root: ${PICKLE_OUTPUT_ROOT}"
 echo "[Scheduler] GPUs: $(join_by ', ' "${GPU_IDS_ARRAY[@]}")"
 echo "[Scheduler] Discovered checkpoints: ${#DISCOVERED_IDS[@]}"
 if ((${#EXCLUDED_IDS[@]} > 0)); then
   echo "[Scheduler] Excluded task IDs: $(join_by ', ' "${EXCLUDED_IDS[@]}")"
 fi
-echo "[Scheduler] Selected tasks: ${#SELECTED_IDS[@]}; already complete: ${#COMPLETED_IDS[@]}; pending: ${#PENDING_IDS[@]}"
-echo "[Scheduler] Target successes per task: ${NUM_SUCCESSES}; max attempts per invocation: ${MAX_ATTEMPTS}"
+echo "[Scheduler] Selected tasks: ${#SELECTED_IDS[@]}; pending: ${#PENDING_IDS[@]}"
+echo "[Scheduler] Target selected successes per task: ${NUM_SUCCESSES}; max attempts: ${MAX_ATTEMPTS}"
+echo "[Scheduler] Default num envs: ${NUM_ENVS}; writer workers: ${WRITER_WORKERS}; max pending writes: ${MAX_PENDING_WRITES}"
 echo "[Scheduler] Log directory: ${LOG_DIR}"
 
 if is_truthy "${DRY_RUN:-0}"; then
   echo "[Scheduler] Dry run: no directories or collector processes will be created."
-  for task_id in "${COMPLETED_IDS[@]}"; do
-    echo "[Scheduler] Would skip assembly_id=${task_id}; existing=${INITIAL_SUCCESSES[${task_id}]}/${NUM_SUCCESSES}"
-  done
   for index in "${!PENDING_IDS[@]}"; do
     task_id="${PENDING_IDS[${index}]}"
     gpu_id="${GPU_IDS_ARRAY[$((index % ${#GPU_IDS_ARRAY[@]}))]}"
-    echo "[Scheduler] Would enqueue assembly_id=${task_id}; preview_gpu=${gpu_id}; existing=${INITIAL_SUCCESSES[${task_id}]}; collect=${REMAINING_SUCCESSES[${task_id}]}; seed=${TASK_SEEDS[${task_id}]}; checkpoint=${CHECKPOINT_BY_ID[${task_id}]}; output=${TASK_OUTPUT_DIR[${task_id}]}"
+    task_num_envs="${NUM_ENVS}"
+    [[ -z "${ENV32_SET[${task_id}]:-}" ]] || task_num_envs=32
+    echo "[Scheduler] Would enqueue assembly_id=${task_id}; preview_gpu=${gpu_id}; num_envs=${task_num_envs}; collect=${REMAINING_SUCCESSES[${task_id}]}; seed=${TASK_SEEDS[${task_id}]}; checkpoint=${CHECKPOINT_BY_ID[${task_id}]}; output=${TASK_OUTPUT_DIR[${task_id}]}"
   done
   exit 0
 fi
@@ -565,25 +622,17 @@ fi
 
 SUMMARY_FILE="${LOG_DIR}/summary.tsv"
 FAILED_FILE="${LOG_DIR}/failed.txt"
-printf "assembly_id\tgpu\tpid\tcheckpoint\toutput_dir\tinitial_successes\trequested_successes\tfinal_successes\tseed\tstart_time\tend_time\tstatus\texit_code\tlog_path\n" >"${SUMMARY_FILE}"
+printf "assembly_id\tgpu\tpid\tcheckpoint\toutput_dir\tinitial_successes\trequested_successes\tfinal_successes\tseed\tnum_envs\tstart_time\tend_time\tstatus\texit_code\tlog_path\n" >"${SUMMARY_FILE}"
 : >"${FAILED_FILE}"
 
-for task_id in "${COMPLETED_IDS[@]}"; do
-  timestamp="$(date -Is)"
-  printf "%s\t-\t-\t%s\t%s\t%s\t0\t%s\t-\t%s\t%s\talready_complete\t0\t-\n" \
-    "${task_id}" "${CHECKPOINT_BY_ID[${task_id}]}" "${TASK_OUTPUT_DIR[${task_id}]}" \
-    "${INITIAL_SUCCESSES[${task_id}]}" "${INITIAL_SUCCESSES[${task_id}]}" \
-    "${timestamp}" "${timestamp}" >>"${SUMMARY_FILE}"
-done
-
 if ((${#PENDING_IDS[@]} == 0)); then
-  echo "[Scheduler] Every selected task already has at least ${NUM_SUCCESSES} success pickles."
+  echo "[Scheduler] No tasks selected."
   echo "[Scheduler] Summary: ${SUMMARY_FILE}"
   exit 0
 fi
 
-CONDA_ROOT="${CONDA_ROOT:-/mnt/nas/share/home/lq/miniconda3}"
-CONDA_ENV="${CONDA_ENV:-automate}"
+CONDA_ROOT="${CONDA_ROOT:-/mnt/nas/share/home/hy/miniconda3}"
+CONDA_ENV="${CONDA_ENV:-rr-isaaclab-gpu-0821-20260822}"
 EXPECTED_PYTHON="${CONDA_ROOT}/envs/${CONDA_ENV}/bin/python"
 CURRENT_PYTHON="$(command -v python || true)"
 if [[ "${CONDA_DEFAULT_ENV:-}" == "${CONDA_ENV}" || "${CURRENT_PYTHON}" == "${EXPECTED_PYTHON}" ]]; then
@@ -607,6 +656,7 @@ declare -A PID_TO_GPU=()
 declare -A PID_TO_ID=()
 declare -A PID_TO_LOG=()
 declare -A PID_TO_START=()
+declare -A PID_TO_NUM_ENVS=()
 
 STOPPING=0
 CURRENT_TIMER_PID=""

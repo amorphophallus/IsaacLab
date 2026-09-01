@@ -85,7 +85,7 @@ class AssemblyCameraCfg:
     gpu_collision_stack_size: int = 2**27
 
     wrist: CameraCfg = CameraCfg(
-        prim_path="/World/envs/env_0/Robot/panda_hand/wrist_camera",
+        prim_path="/World/envs/env_.*/Robot/panda_hand/wrist_camera",
         update_period=0.0,
         # Match FurnitureBench's 320x240 calibration before the canonical
         # 224x224 center crop. Keeping 640x480 here doubles the final pixel
@@ -110,7 +110,7 @@ class AssemblyCameraCfg:
     )
 
     front: CameraCfg = CameraCfg(
-        prim_path="/World/envs/env_0/front_camera",
+        prim_path="/World/envs/env_.*/front_camera",
         update_period=0.0,
         # At width=320 IsaacLab computes fx~=308 px, matching the FB front
         # stream before and after the 224x224 center crop.
