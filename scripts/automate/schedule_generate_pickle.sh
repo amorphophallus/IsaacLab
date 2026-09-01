@@ -195,8 +195,12 @@ remove_active_pid() {
 terminate_process_group() {
   local pid="$1"
 
-  if kill -0 "${pid}" 2>/dev/null; then
-    kill -TERM -- "-${pid}" 2>/dev/null || kill -TERM "${pid}" 2>/dev/null || true
+  # The setsid leader can exit before its writer/Kit descendants. Probe the
+  # process group itself so signal cleanup still reaches those descendants.
+  if kill -0 -- "-${pid}" 2>/dev/null; then
+    kill -TERM -- "-${pid}" 2>/dev/null || true
+  elif kill -0 "${pid}" 2>/dev/null; then
+    kill -TERM "${pid}" 2>/dev/null || true
   fi
 }
 
