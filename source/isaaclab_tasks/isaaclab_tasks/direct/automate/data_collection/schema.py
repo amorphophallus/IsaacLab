@@ -39,13 +39,13 @@ class Observation(TypedDict):
     depth_image2: np.ndarray
     parts_poses: np.ndarray
     point_cloud: None
-    skill: None
-    guidance_point: None
-    guidance_point_clean: None
+    skill: str
+    guidance_point: np.ndarray
+    guidance_point_clean: np.ndarray
     guidance_pose: None
     guidance_pose_clean: None
     guidance_gripper_width: None
-    guidance_point_2d: None
+    guidance_point_2d: dict[str, np.ndarray | None]
     grasp_annotation_2d: None
 
 
@@ -73,6 +73,8 @@ class Trajectory(TypedDict):
     task: str
     action_type: str
     env: str
+    annotation_source: str
+    image_annotation_mode: str
 
 
 TRAJECTORY_KEYS = frozenset(Trajectory.__required_keys__)
@@ -82,8 +84,16 @@ CAMERA_INFO_KEYS = frozenset(CameraInfo.__required_keys__)
 CAMERA_CALIBRATION_KEYS = frozenset(CameraCalibration.__required_keys__)
 
 ENV_NAME = "AutoMate"
+ANNOTATION_SOURCE = "scripted"
+IMAGE_ANNOTATION_MODE = "none"
 STORED_IMAGE_HEIGHT = 224
 STORED_IMAGE_WIDTH = 224
+CAMERA_SOURCE_HEIGHT = 240
+CAMERA_SOURCE_WIDTH = 320
+CAMERA_HORIZONTAL_APERTURE = 1.92
+CAMERA_VERTICAL_APERTURE = 1.44
+WRIST_CAMERA_FOCAL_LENGTH = 1.839464721675
+FRONT_CAMERA_FOCAL_LENGTH = 1.848554759492
 
 ROBOT_STATE_SHAPES: dict[str, tuple[int, ...]] = {
     "ee_pos": (3,),

@@ -13,6 +13,15 @@ from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
 from isaaclab.utils import configclass
 
+from .data_collection.schema import (
+    CAMERA_HORIZONTAL_APERTURE,
+    CAMERA_SOURCE_HEIGHT,
+    CAMERA_SOURCE_WIDTH,
+    CAMERA_VERTICAL_APERTURE,
+    FRONT_CAMERA_FOCAL_LENGTH,
+    WRIST_CAMERA_FOCAL_LENGTH,
+)
+
 from .assembly_tasks_cfg import ASSET_DIR, Insertion
 
 OBS_DIM_CFG = {
@@ -78,14 +87,17 @@ class AssemblyCameraCfg:
     wrist: CameraCfg = CameraCfg(
         prim_path="/World/envs/env_0/Robot/panda_hand/wrist_camera",
         update_period=0.0,
-        height=480,
-        width=640,
+        # Match FurnitureBench's 320x240 calibration before the canonical
+        # 224x224 center crop. Keeping 640x480 here doubles the final pixel
+        # focal length because StateAdapter crops without resizing.
+        height=CAMERA_SOURCE_HEIGHT,
+        width=CAMERA_SOURCE_WIDTH,
         data_types=["rgb", "distance_to_image_plane"],
         depth_clipping_behavior="zero",
         spawn=sim_utils.PinholeCameraCfg(
-            focal_length=1.839464721675,
-            horizontal_aperture=1.92,
-            vertical_aperture=1.44,
+            focal_length=WRIST_CAMERA_FOCAL_LENGTH,
+            horizontal_aperture=CAMERA_HORIZONTAL_APERTURE,
+            vertical_aperture=CAMERA_VERTICAL_APERTURE,
             clipping_range=(1.0e-5, 1.0e5),
             f_stop=0.0,
             focus_distance=0.0,
@@ -100,24 +112,26 @@ class AssemblyCameraCfg:
     front: CameraCfg = CameraCfg(
         prim_path="/World/envs/env_0/front_camera",
         update_period=0.0,
-        height=480,
-        width=640,
+        # At width=320 IsaacLab computes fx~=308 px, matching the FB front
+        # stream before and after the 224x224 center crop.
+        height=CAMERA_SOURCE_HEIGHT,
+        width=CAMERA_SOURCE_WIDTH,
         data_types=["rgb", "distance_to_image_plane"],
         depth_clipping_behavior="zero",
         spawn=sim_utils.PinholeCameraCfg(
-            # RR renders at 1280x720 with a 69.4-degree horizontal FOV, then
-            # center-crops to 4:3. This is the equivalent focal length at 640x480.
-            focal_length=1.848554759492,
-            horizontal_aperture=1.92,
-            vertical_aperture=1.44,
+            # Equivalent to the calibrated FB 320x240 front stream.
+            focal_length=FRONT_CAMERA_FOCAL_LENGTH,
+            horizontal_aperture=CAMERA_HORIZONTAL_APERTURE,
+            vertical_aperture=CAMERA_VERTICAL_APERTURE,
             clipping_range=(0.1, 1.0e5),
             f_stop=200.0,
             focus_distance=0.6,
         ),
         offset=CameraCfg.OffsetCfg(
-            # RR main-sim camera (position [0.90, 0.0, 0.65], target [-1.0, 0.0, 0.30])
-            # expressed relative to its robot base at [-0.30, 0.0, 0.415].
-            pos=(1.2, 0.0, 0.235),
+            # User-approved shared AutoMate front camera. Relative to the
+            # original RR-aligned pose, move 0.15 m toward the task and
+            # 0.08 m upward; keep the same OpenGL orientation and intrinsics.
+            pos=(1.05, 0.0, 0.315),
             rot=(0.5434064844747748, 0.4524482209388897, 0.45244822093888976, 0.5434064844747747),
             convention="opengl",
         ),

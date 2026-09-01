@@ -8,7 +8,9 @@ from isaaclab.assets import ArticulationCfg, RigidObjectCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAACLAB_NUCLEUS_DIR
 
-ASSET_DIR = f"{ISAACLAB_NUCLEUS_DIR}/AutoMate"
+from .asset_paths import resolve_isaac_asset_directory
+
+ASSET_DIR = resolve_isaac_asset_directory("IsaacLab/AutoMate", default_root=ISAACLAB_NUCLEUS_DIR)
 
 OBS_DIM_CFG = {
     "fingertip_pos": 3,

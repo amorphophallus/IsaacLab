@@ -9,14 +9,23 @@ from __future__ import annotations
 
 import argparse
 import sys
+import types
 
 from isaaclab.app import AppLauncher
+
+
+EXCLUDED_ASSEMBLY_IDS = frozenset({"00755"})
 
 
 def _normalize_assembly_id(value: str) -> str:
     if not value.isdigit():
         raise argparse.ArgumentTypeError(f"assembly ID must be numeric, received {value!r}.")
-    return value.zfill(5) if len(value) < 5 else value
+    normalized = value.zfill(5) if len(value) < 5 else value
+    if normalized in EXCLUDED_ASSEMBLY_IDS:
+        raise argparse.ArgumentTypeError(
+            f"assembly {normalized} is excluded from the 99-task production campaign"
+        )
+    return normalized
 
 
 parser = argparse.ArgumentParser(description="Generate RR-compatible AutoMate rollout pickles.")
@@ -29,6 +38,12 @@ parser.add_argument(
 )
 parser.add_argument("--checkpoint", type=str, required=True, help="RL-Games checkpoint path.")
 parser.add_argument("--assembly-id", type=_normalize_assembly_id, required=True, help="AutoMate assembly asset ID.")
+parser.add_argument(
+    "--annotation-source",
+    choices=("scripted",),
+    required=True,
+    help="Required provenance gate; AutoMate insertion targets are geometry GT.",
+)
 parser.add_argument(
     "--output-dir",
     type=str,
@@ -49,6 +64,11 @@ parser.add_argument(
     help="Maximum policy steps per attempt. Defaults to the configured AutoMate horizon.",
 )
 parser.add_argument("--save-failures", action="store_true", help="Also write max-step failure trajectories.")
+parser.add_argument(
+    "--skip-dense-reward",
+    action="store_true",
+    help="Skip collection-irrelevant SDF/SoftDTW reward while preserving success checks.",
+)
 parser.add_argument("--compress", action="store_true", help="Write .pkl.xz instead of uncompressed .pkl files.")
 parser.add_argument(
     "--deterministic",
@@ -147,6 +167,11 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: dict):
     env_cfg.episode_length_s = (max_steps + 2) * configured_step_dt
 
     agent_cfg["params"]["seed"] = args_cli.seed
+    if args_cli.device is not None:
+        # Keep RL-Games on the selected simulation device. This mirrors the
+        # standard Isaac Lab play/train launchers and avoids device copies.
+        agent_cfg["params"]["config"]["device"] = args_cli.device
+        agent_cfg["params"]["config"]["device_name"] = args_cli.device
     resume_path = retrieve_file_path(args_cli.checkpoint)
     log_dir = os.path.dirname(os.path.dirname(resume_path))
     env_cfg.log_dir = log_dir
@@ -166,6 +191,31 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: dict):
 
     gym_env = gym.make(args_cli.task, cfg=env_cfg)
     raw_env = gym_env.unwrapped
+
+    raw_env._collection_reset_step_counter = 0
+
+    def step_reset_sim_with_periodic_render(self):
+        """Advance reset physics with the same render cadence as normal steps."""
+        self.scene.write_data_to_sim()
+        self.sim.step(render=False)
+        self._collection_reset_step_counter += 1
+        if self._collection_reset_step_counter % self.cfg.sim.render_interval == 0:
+            self.sim.render()
+        self.scene.update(dt=self.physics_dt)
+        self._compute_intermediate_values(dt=self.physics_dt)
+
+    # Install this only after construction, when RTX sensors and their render
+    # pipeline are initialized. Rendering every IK/gripper reset substep changes
+    # the grasp dynamics, while never rendering can desynchronize PhysX/RTX GPU
+    # streams. Match DirectRLEnv.step(): render once per configured interval.
+    raw_env.step_sim_no_action = types.MethodType(step_reset_sim_with_periodic_render, raw_env)
+    if args_cli.skip_dense_reward:
+        # Dense SDF/SoftDTW rewards are training signals, not policy inputs or
+        # recorded rewards. AssemblyEnv._get_rewards still computes and latches
+        # the official insertion success before calling this function.
+        raw_env._update_rew_buf = lambda curr_successes: curr_successes.to(dtype=torch.float32)
+        print("[INFO] Skipping collection-irrelevant SDF/SoftDTW dense reward.")
+
     env = RlGamesVecEnvWrapper(
         gym_env,
         rl_device,
@@ -196,6 +246,7 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: dict):
     attempts_completed = 0
     print(f"[INFO] Checkpoint: {resume_path}")
     print(f"[INFO] Task label: {task_label}")
+    print(f"[INFO] Annotation source: {args_cli.annotation_source}")
     print(f"[INFO] Target successes: {args_cli.num_successes}; max attempts: {max_attempts}; max steps: {max_steps}")
     print(f"[INFO] Policy mode: {'deterministic' if args_cli.deterministic else 'stochastic'}")
     print(f"[INFO] Sampling-based curriculum: {'enabled' if args_cli.enable_sbc else 'disabled'}")

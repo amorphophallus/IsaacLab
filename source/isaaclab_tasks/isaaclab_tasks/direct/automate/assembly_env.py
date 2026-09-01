@@ -27,6 +27,7 @@ from . import factory_control as fc
 from . import industreal_algo_utils as industreal_algo
 from .assembly_env_cfg import OBS_DIM_CFG, STATE_DIM_CFG, AssemblyEnvCfg
 from .assembly_tasks_cfg import ASSET_DIR
+from .asset_paths import resolve_isaac_asset_path
 from .soft_dtw_cuda import SoftDTW
 
 
@@ -291,10 +292,20 @@ class AssemblyEnv(DirectRLEnv):
 
     def _setup_scene(self):
         """Initialize simulation scene."""
-        spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg(), translation=(0.0, 0.0, -0.4))
+        ground_usd_path = resolve_isaac_asset_path(
+            "Environments/Grid/default_environment.usd", default_root=ISAAC_NUCLEUS_DIR
+        )
+        spawn_ground_plane(
+            prim_path="/World/ground",
+            cfg=GroundPlaneCfg(usd_path=ground_usd_path),
+            translation=(0.0, 0.0, -0.4),
+        )
 
         # spawn a usd file of a table into the scene
-        cfg = sim_utils.UsdFileCfg(usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Mounts/SeattleLabTable/table_instanceable.usd")
+        table_usd_path = resolve_isaac_asset_path(
+            "Props/Mounts/SeattleLabTable/table_instanceable.usd", default_root=ISAAC_NUCLEUS_DIR
+        )
+        cfg = sim_utils.UsdFileCfg(usd_path=table_usd_path)
         cfg.func(
             "/World/envs/env_.*/Table", cfg, translation=(0.55, 0.0, 0.0), orientation=(0.70711, 0.0, 0.0, 0.70711)
         )

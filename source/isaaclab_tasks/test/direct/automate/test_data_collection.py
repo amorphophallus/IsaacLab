@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import lzma
+import ast
 import pickle
 import sys
 from copy import deepcopy
@@ -22,6 +23,11 @@ import torch
 AUTOMATE_SOURCE_DIR = Path(__file__).resolve().parents[3] / "isaaclab_tasks" / "direct" / "automate"
 sys.path.insert(0, str(AUTOMATE_SOURCE_DIR))
 
+from asset_paths import (  # noqa: E402
+    LOCAL_ISAAC_ASSET_ROOT_ENV,
+    resolve_isaac_asset_directory,
+    resolve_isaac_asset_path,
+)
 from data_collection import (  # noqa: E402
     ActionAdapter,
     EpisodeBuffer,
@@ -32,7 +38,12 @@ from data_collection import (  # noqa: E402
     write_trajectory,
 )
 from data_collection.schema import (  # noqa: E402
+    ANNOTATION_SOURCE,
+    CAMERA_HORIZONTAL_APERTURE,
+    CAMERA_SOURCE_WIDTH,
     ENV_NAME,
+    FRONT_CAMERA_FOCAL_LENGTH,
+    IMAGE_ANNOTATION_MODE,
     ROBOT_STATE_KEYS,
     ROBOT_STATE_SHAPES,
     STORED_IMAGE_HEIGHT,
@@ -108,6 +119,9 @@ def _fake_env() -> SimpleNamespace:
         fingertip_midpoint_pos=torch.tensor([[0.09, 0.0, 0.3]], dtype=dtype),
         fingertip_midpoint_quat=ee_quat.clone(),
         fixed_pos_action_frame=torch.tensor([[0.0, 0.0, 0.3]], dtype=dtype),
+        # Env-local target whose world position is directly in front of the
+        # fake camera's +X optical axis.
+        fixed_pos_obs_frame=torch.tensor([[1.5, 0.0, 0.5]], dtype=dtype),
         fingertip_body_idx=0,
         scene=SimpleNamespace(env_origins=torch.tensor([[1.0, 2.0, 3.0]], dtype=dtype)),
         _robot=SimpleNamespace(data=robot_data),
@@ -117,6 +131,63 @@ def _fake_env() -> SimpleNamespace:
     )
     env.get_camera_observations = lambda env_idx=0: deepcopy(camera_observation)
     return env
+
+
+def test_offline_isaac_asset_root_is_explicit_and_fail_closed(monkeypatch, tmp_path):
+    relative_path = "Environments/Grid/default_environment.usd"
+    default_root = "https://example.invalid/Isaac"
+
+    monkeypatch.delenv(LOCAL_ISAAC_ASSET_ROOT_ENV, raising=False)
+    assert resolve_isaac_asset_path(relative_path, default_root=default_root) == (
+        f"{default_root}/{relative_path}"
+    )
+
+    local_root = tmp_path / "Isaac"
+    local_asset = local_root / relative_path
+    local_asset.parent.mkdir(parents=True)
+    local_asset.write_bytes(b"official asset fixture")
+    monkeypatch.setenv(LOCAL_ISAAC_ASSET_ROOT_ENV, str(local_root))
+    assert resolve_isaac_asset_path(relative_path, default_root=default_root) == str(local_asset.resolve())
+    automate_root = local_root / "IsaacLab" / "AutoMate"
+    automate_root.mkdir(parents=True)
+    assert resolve_isaac_asset_directory("IsaacLab/AutoMate", default_root=default_root) == str(
+        automate_root.resolve()
+    )
+
+    with pytest.raises(FileNotFoundError, match="Missing official Isaac asset"):
+        resolve_isaac_asset_path("Props/missing.usd", default_root=default_root)
+    with pytest.raises(ValueError, match="safe Isaac-relative"):
+        resolve_isaac_asset_path("../outside.usd", default_root=default_root)
+    with pytest.raises(FileNotFoundError, match="Missing official Isaac asset directory"):
+        resolve_isaac_asset_directory("IsaacLab/Missing", default_root=default_root)
+
+
+def test_production_generator_requires_scripted_and_excludes_00755():
+    generator = Path(__file__).resolve().parents[5] / "scripts" / "automate" / "generate_pickle.py"
+    source = generator.read_text()
+    tree = ast.parse(source)
+    assert 'EXCLUDED_ASSEMBLY_IDS = frozenset({"00755"})' in source
+    assert '"--annotation-source"' in source
+    assert 'choices=("scripted",)' in source
+    assert "required=True" in source
+    assert any(
+        isinstance(node, ast.FunctionDef) and node.name == "_normalize_assembly_id"
+        for node in tree.body
+    )
+
+
+def test_source_camera_intrinsics_match_fb_after_224_center_crop():
+    focal_px = (
+        CAMERA_SOURCE_WIDTH
+        * FRONT_CAMERA_FOCAL_LENGTH
+        / CAMERA_HORIZONTAL_APERTURE
+    )
+    final_fov_deg = np.degrees(
+        2.0 * np.arctan(STORED_IMAGE_WIDTH / (2.0 * focal_px))
+    )
+
+    assert focal_px == pytest.approx(308.0924599153333)
+    assert final_fov_deg == pytest.approx(39.965, abs=0.01)
 
 
 def test_quaternion_conversion_and_base_pose_round_trip():
@@ -206,8 +277,20 @@ def test_state_adapter_strict_rr_schema_and_parts_order():
     assert np.allclose(observation["parts_poses"][:3], [0.1, 0.0, 0.0])
     assert np.allclose(observation["parts_poses"][7:10], [0.2, 0.0, 0.0])
     assert np.allclose(observation["robot_state"]["gripper_width"], [0.03])
-    required_fields = {"robot_state", "color_image1", "color_image2", "depth_image1", "depth_image2", "parts_poses"}
-    assert all(observation[key] is None for key in observation if key not in required_fields)
+    assert observation["skill"] == "insert"
+    assert observation["guidance_point"] == pytest.approx([1.5, 0.0, 0.5])
+    assert np.array_equal(
+        observation["guidance_point"], observation["guidance_point_clean"]
+    )
+    assert observation["guidance_point_2d"]["color_image1"] is None
+    assert observation["guidance_point_2d"]["color_image2"] == pytest.approx(
+        [112.0, 112.0]
+    )
+    assert observation["point_cloud"] is None
+    assert observation["guidance_pose"] is None
+    assert observation["guidance_pose_clean"] is None
+    assert observation["guidance_gripper_width"] is None
+    assert observation["grasp_annotation_2d"] is None
 
     front_camera = StateAdapter().camera_info(_fake_env())["front_camera"]
     assert front_camera["image_size"].tolist() == [STORED_IMAGE_WIDTH, STORED_IMAGE_HEIGHT]
@@ -272,6 +355,8 @@ def test_episode_buffer_enforces_t_plus_one_observations():
     assert len(trajectory["observations"]) == 2
     assert len(trajectory["actions"]) == len(trajectory["rewards"]) == 1
     assert trajectory["env"] == ENV_NAME == "AutoMate"
+    assert trajectory["annotation_source"] == ANNOTATION_SOURCE == "scripted"
+    assert trajectory["image_annotation_mode"] == IMAGE_ANNOTATION_MODE == "none"
     validate_trajectory(trajectory)
 
 
@@ -293,6 +378,20 @@ def test_validator_rejects_wrong_environment_name():
     trajectory = _valid_trajectory()
     trajectory["env"] = "automate"
     with pytest.raises(TrajectoryValidationError, match="env must be 'AutoMate'"):
+        validate_trajectory(trajectory)
+
+
+def test_validator_rejects_non_raw_image_annotation_mode():
+    trajectory = _valid_trajectory()
+    trajectory["image_annotation_mode"] = "guidance-point"
+    with pytest.raises(TrajectoryValidationError, match="image_annotation_mode"):
+        validate_trajectory(trajectory)
+
+
+def test_validator_rejects_guidance_pixel_inconsistent_with_calibration():
+    trajectory = _valid_trajectory()
+    trajectory["observations"][0]["guidance_point_2d"]["color_image2"][0] += 1.0
+    with pytest.raises(TrajectoryValidationError, match="calibrated 3D guidance"):
         validate_trajectory(trajectory)
 
 

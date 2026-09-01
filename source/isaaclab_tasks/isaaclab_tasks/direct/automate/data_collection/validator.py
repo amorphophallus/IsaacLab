@@ -14,11 +14,12 @@ from typing import Any
 import numpy as np
 
 from .schema import (
+    ANNOTATION_SOURCE,
     CAMERA_CALIBRATION_KEYS,
     CAMERA_INFO_KEYS,
     ENV_NAME,
+    IMAGE_ANNOTATION_MODE,
     OBSERVATION_KEYS,
-    OPTIONAL_OBSERVATION_FIELDS,
     ROBOT_STATE_KEYS,
     ROBOT_STATE_SHAPES,
     STORED_IMAGE_HEIGHT,
@@ -92,6 +93,15 @@ def validate_trajectory(trajectory: Trajectory) -> None:
         raise TrajectoryValidationError("success must be a Python bool.")
     if trajectory["env"] != ENV_NAME:
         raise TrajectoryValidationError(f"env must be {ENV_NAME!r}, received {trajectory['env']!r}.")
+    if trajectory["annotation_source"] != ANNOTATION_SOURCE:
+        raise TrajectoryValidationError(
+            f"annotation_source must be {ANNOTATION_SOURCE!r}, received {trajectory['annotation_source']!r}."
+        )
+    if trajectory["image_annotation_mode"] != IMAGE_ANNOTATION_MODE:
+        raise TrajectoryValidationError(
+            "image_annotation_mode must be "
+            f"{IMAGE_ANNOTATION_MODE!r}, received {trajectory['image_annotation_mode']!r}."
+        )
     if not isinstance(trajectory["task"], str) or _TASK_PATTERN.fullmatch(trajectory["task"]) is None:
         raise TrajectoryValidationError("task must match 'automate_insertion_<assembly_id>'.")
     if trajectory["action_type"] != "delta":
@@ -123,14 +133,61 @@ def validate_trajectory(trajectory: Trajectory) -> None:
     for index, observation in enumerate(observations):
         _validate_observation(observation, index)
     _validate_camera_info(trajectory["camera_info"], observations[0])
+    _validate_guidance_projections(
+        observations, trajectory["camera_info"]["front_camera"]
+    )
 
 
 def _validate_observation(observation: Any, index: int) -> None:
     path = f"observations[{index}]"
     _require_exact_keys(observation, OBSERVATION_KEYS, path)
-    for field in OPTIONAL_OBSERVATION_FIELDS:
+    for field in (
+        "point_cloud",
+        "guidance_pose",
+        "guidance_pose_clean",
+        "guidance_gripper_width",
+        "grasp_annotation_2d",
+    ):
         if observation[field] is not None:
             raise TrajectoryValidationError(f"{path}.{field} must be None for AutoMate collection.")
+    if observation["skill"] != "insert":
+        raise TrajectoryValidationError(f"{path}.skill must be 'insert'.")
+    guidance_point = _require_array(
+        observation["guidance_point"],
+        path=f"{path}.guidance_point",
+        shape=(3,),
+        dtype=np.dtype(np.float32),
+    )
+    guidance_point_clean = _require_array(
+        observation["guidance_point_clean"],
+        path=f"{path}.guidance_point_clean",
+        shape=(3,),
+        dtype=np.dtype(np.float32),
+    )
+    if not np.array_equal(guidance_point, guidance_point_clean):
+        raise TrajectoryValidationError(
+            f"{path}: noiseless AutoMate guidance point and clean copy must match."
+        )
+    points_2d = observation["guidance_point_2d"]
+    _require_exact_keys(
+        points_2d,
+        frozenset({"color_image1", "color_image2"}),
+        f"{path}.guidance_point_2d",
+    )
+    if points_2d["color_image1"] is not None:
+        raise TrajectoryValidationError(
+            f"{path}.guidance_point_2d.color_image1 must be None without wrist calibration."
+        )
+    front_point = _require_array(
+        points_2d["color_image2"],
+        path=f"{path}.guidance_point_2d.color_image2",
+        shape=(2,),
+        dtype=np.dtype(np.float32),
+    )
+    if np.any(front_point < 0.0) or np.any(front_point >= STORED_IMAGE_WIDTH):
+        raise TrajectoryValidationError(
+            f"{path}.guidance_point_2d.color_image2 lies outside the stored image."
+        )
 
     robot_state = observation["robot_state"]
     _require_exact_keys(robot_state, ROBOT_STATE_KEYS, f"{path}.robot_state")
@@ -220,3 +277,29 @@ def _validate_camera_info(camera_info: Any, first_observation: Any) -> None:
     )
     if not np.allclose(camera_to_base @ base_to_camera, np.eye(4), atol=1.0e-4, rtol=0.0):
         raise TrajectoryValidationError("front camera extrinsic matrices are not mutual inverses.")
+
+
+def _validate_guidance_projections(observations: list[Any], calibration: Any) -> None:
+    """Verify that every stored front pixel is the calibrated 3D target."""
+
+    intrinsics = calibration["intrinsics"]
+    base_to_camera = calibration["sim_local_to_camera"]
+    for index, observation in enumerate(observations):
+        point_h = np.concatenate(
+            (observation["guidance_point"], np.ones(1, dtype=np.float32))
+        )
+        point_camera = base_to_camera @ point_h
+        if point_camera[2] <= 1.0e-8:
+            raise TrajectoryValidationError(
+                f"observations[{index}].guidance_point is behind the front camera."
+            )
+        point_camera = point_camera[:3].copy()
+        point_camera[1] *= -1.0
+        pixel_h = intrinsics @ point_camera
+        expected = pixel_h[:2] / pixel_h[2]
+        actual = observation["guidance_point_2d"]["color_image2"]
+        if not np.allclose(actual, expected, atol=1.0e-4, rtol=0.0):
+            raise TrajectoryValidationError(
+                f"observations[{index}].guidance_point_2d.color_image2 does not "
+                "match the calibrated 3D guidance point."
+            )

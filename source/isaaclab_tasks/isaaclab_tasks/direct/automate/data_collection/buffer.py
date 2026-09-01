@@ -11,7 +11,14 @@ from copy import deepcopy
 
 import numpy as np
 
-from .schema import ENV_NAME, CameraInfo, Observation, Trajectory
+from .schema import (
+    ANNOTATION_SOURCE,
+    ENV_NAME,
+    IMAGE_ANNOTATION_MODE,
+    CameraInfo,
+    Observation,
+    Trajectory,
+)
 
 
 class EpisodeBuffer:
@@ -67,6 +74,8 @@ class EpisodeBuffer:
             "task": str(task),
             "action_type": "delta",
             "env": ENV_NAME,
+            "annotation_source": ANNOTATION_SOURCE,
+            "image_annotation_mode": IMAGE_ANNOTATION_MODE,
         }
 
     def _assert_lengths(self) -> None:

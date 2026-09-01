@@ -20,7 +20,13 @@ from .schema import (
     RobotState,
     observation_placeholders,
 )
-from .transforms import pose_world_to_base, rr_camera_to_base_matrix, twist_world_to_base, wxyz_to_xyzw
+from .transforms import (
+    pose_world_to_base,
+    quat_apply_inverse_wxyz,
+    rr_camera_to_base_matrix,
+    twist_world_to_base,
+    wxyz_to_xyzw,
+)
 
 
 def _float32_numpy(tensor: torch.Tensor) -> np.ndarray:
@@ -93,6 +99,25 @@ class StateAdapter:
         color_image2 = self._rgb_image(camera_obs["color_image2"], "color_image2")
         depth_image1 = self._depth_image(camera_obs["depth_image1"], "depth_image1")
         depth_image2 = self._depth_image(camera_obs["depth_image2"], "depth_image2")
+        guidance_point = self._guidance_point_in_base(
+            env, env_idx, base_pos_w, base_quat_w
+        )
+        front_calibration = self.camera_info(env, env_idx)["front_camera"]
+        guidance_point_2d = self._project_front_point(
+            guidance_point, front_calibration
+        )
+        annotations = observation_placeholders()
+        annotations.update(
+            {
+                "skill": "insert",
+                "guidance_point": guidance_point,
+                "guidance_point_clean": guidance_point.copy(),
+                "guidance_point_2d": {
+                    "color_image1": None,
+                    "color_image2": guidance_point_2d,
+                },
+            }
+        )
 
         observation: Observation = {
             "robot_state": robot_state,
@@ -101,7 +126,7 @@ class StateAdapter:
             "depth_image1": depth_image1,
             "depth_image2": depth_image2,
             "parts_poses": parts_poses,
-            **observation_placeholders(),
+            **annotations,
         }
         return observation
 
@@ -162,6 +187,49 @@ class StateAdapter:
             object_data.root_quat_w[env_idx],
         )
         return _float32_numpy(torch.cat((pos_b, wxyz_to_xyzw(quat_b)), dim=-1))
+
+    @staticmethod
+    def _guidance_point_in_base(
+        env: Any,
+        env_idx: int,
+        base_pos_w: torch.Tensor,
+        base_quat_w: torch.Tensor,
+    ) -> np.ndarray:
+        """Return the clean fixed-asset tip used as AutoMate's insertion frame."""
+
+        if not hasattr(env, "fixed_pos_obs_frame"):
+            raise AttributeError(
+                "AutoMate guidance collection requires fixed_pos_obs_frame."
+            )
+        point_env = env.fixed_pos_obs_frame[env_idx]
+        point_w = point_env + env.scene.env_origins[env_idx]
+        point_b = quat_apply_inverse_wxyz(base_quat_w, point_w - base_pos_w)
+        return _float32_numpy(point_b)
+
+    @staticmethod
+    def _project_front_point(
+        point_b: np.ndarray, calibration: dict[str, np.ndarray]
+    ) -> np.ndarray | None:
+        point_h = np.concatenate(
+            (np.asarray(point_b, dtype=np.float32), np.ones(1, dtype=np.float32))
+        )
+        point_camera = calibration["sim_local_to_camera"] @ point_h
+        if not np.isfinite(point_camera).all() or point_camera[2] <= 1.0e-8:
+            return None
+        point_cv = point_camera[:3].copy()
+        point_cv[1] *= -1.0
+        pixel_h = calibration["intrinsics"] @ point_cv
+        pixel = pixel_h[:2] / pixel_h[2]
+        width, height = calibration["image_size"]
+        if (
+            not np.isfinite(pixel).all()
+            or pixel[0] < 0.0
+            or pixel[0] >= width
+            or pixel[1] < 0.0
+            or pixel[1] >= height
+        ):
+            return None
+        return np.ascontiguousarray(pixel, dtype=np.float32)
 
     @staticmethod
     def _rgb_image(image: np.ndarray, name: str) -> np.ndarray:
