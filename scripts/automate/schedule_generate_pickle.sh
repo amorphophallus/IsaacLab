@@ -648,6 +648,11 @@ fi
 echo "[Scheduler] Python: $(command -v python)"
 
 cd "${REPO_ROOT}"
+# The configured environment can be an editable install from another worktree.
+# Bind production imports to this audited commit without mutating that shared
+# environment or the neighboring worktree.
+export PYTHONPATH="${REPO_ROOT}/source/isaaclab_tasks:${REPO_ROOT}/source/isaaclab:${REPO_ROOT}/source/isaaclab_rl:${REPO_ROOT}/source/isaaclab_assets${PYTHONPATH:+:${PYTHONPATH}}"
+echo "[Scheduler] Source-bound PYTHONPATH: ${PYTHONPATH}"
 
 declare -a ACTIVE_PIDS=()
 declare -a FREE_GPUS=("${GPU_IDS_ARRAY[@]}")

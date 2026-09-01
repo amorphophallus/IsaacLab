@@ -224,6 +224,7 @@ def test_production_generator_has_maintained_vectorized_exact_quota_path():
     assert 'if [[ "${task_id}" == "00755" ]]' in scheduler_source
     assert '[[ ! -e "${output_dir}" ]]' in scheduler_source
     assert '.collection-complete' in scheduler_source
+    assert 'export PYTHONPATH="${REPO_ROOT}/source/isaaclab_tasks:' in scheduler_source
 
 
 def test_vectorized_batch_classification_enforces_exact_success_quota():
